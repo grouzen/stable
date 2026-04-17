@@ -128,12 +128,14 @@ Loaded on startup, written on every add/remove action.
 trait AgentAdapter {
     fn agent_type(&self) -> &str;
     fn launch_command(&self) -> &str;
-    fn parse_status(&self, output: &str) -> AgentStatus;
-    fn parse_context_window(&self, output: &str) -> Option<ContextInfo>;
-    fn parse_first_prompt(&self, output: &str) -> Option<String>;
-    fn parse_last_prompt(&self, output: &str) -> Option<String>;
+    fn get_status(&self, session_id: &str) -> AgentStatus;
+    fn get_context(&self, session_id: &str) -> Option<ContextInfo>;
+    fn get_first_prompt(&self, session_id: &str) -> Option<String>;
+    fn get_last_prompt(&self, session_id: &str) -> Option<String>;
 }
 ```
+
+Each adapter decides its own data source. `session_id` is the agent session identifier used to locate the agent's state. For `ClaudeAdapter`, the `get_status`, `get_first_prompt`, and `get_last_prompt` methods read from the hook-written state file at `~/.local/share/stable/agents/<session_id>.json`; `get_context` falls back to regex on `capture_pane` output since Claude Code's hooks do not expose token counts.
 
 ### AgentStatus Enum
 
@@ -146,30 +148,69 @@ enum AgentStatus {
 }
 ```
 
-Inferred heuristically per adapter.
+### AgentHookState
+
+Written to `~/.local/share/stable/agents/<session_id>.json` by hook subcommands:
+
+```rust
+struct AgentHookState {
+    status: AgentStatus,
+    first_prompt: Option<String>,
+    last_prompt: Option<String>,
+}
+```
 
 ### Adapter Implementations
 
 **ClaudeAdapter** (`claude` binary)
 
-| Field | Pattern to match |
+| Method | Data source |
 |---|---|
-| Waiting for input | Prompt line ending with `>` or `❯` after output settles |
-| Running | Spinner chars (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) or `Thinking…` lines |
-| Stopped | Process no longer present / pane shows shell prompt |
-| Context window | Lines like `Context window: 42,341 / 200,000 tokens` |
-| First prompt | First line after banner/header that looks like user input |
-| Last prompt | Last occurrence of user-turn line before agent response |
-| Launch command | `claude` |
+| `get_status` | Reads `~/.local/share/stable/agents/<session_id>.json` written by hook subcommands |
+| `get_first_prompt` | Same state file |
+| `get_last_prompt` | Same state file |
+| `get_context` | Regex on `capture_pane` output: `Context window: 42,341 / 200,000 tokens` |
+| `launch_command` | `claude` |
+
+Hook subcommands read JSON from stdin (as delivered by Claude Code) and update the state file:
+
+```
+stable claude-code hook session-start
+stable claude-code hook user-prompt-submit
+stable claude-code hook pre-tool-use
+stable claude-code hook stop
+stable claude-code hook session-end
+stable claude-code hook stop-failure
+```
+
+Companion management subcommands:
+
+```
+stable claude-code hook install    # merges hook block into ~/.claude/settings.json
+stable claude-code hook uninstall  # removes only the entries stable owns
+```
+
+The hooks block installed into `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart":      [{ "hooks": [{ "type": "command", "async": true, "command": "stable claude-code hook session-start" }] }],
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "async": true, "command": "stable claude-code hook user-prompt-submit" }] }],
+    "PreToolUse":        [{ "hooks": [{ "type": "command", "async": true, "command": "stable claude-code hook pre-tool-use" }] }],
+    "Stop":              [{ "hooks": [{ "type": "command", "async": true, "command": "stable claude-code hook stop" }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "async": true, "command": "stable claude-code hook session-end" }] }],
+    "StopFailure":       [{ "hooks": [{ "type": "command", "async": true, "command": "stable claude-code hook stop-failure" }] }]
+  }
+}
+```
 
 **OpenCodeAdapter** (`opencode` binary)
 
-Similar structure — will be calibrated once we can observe its actual output format.
-
-| Field | Pattern to match |
+| Field | Source |
 |---|---|
 | Launch command | `opencode` |
-| Status / context / prompts | TBD — calibrated against live output |
+| Status / context / prompts | TBD — hooks or stdout parsing calibrated against live output |
 
 ---
 
@@ -280,16 +321,17 @@ AppState
 stable/
   Cargo.toml
   src/
-    main.rs             # clap CLI, tokio runtime, launch App
+    main.rs             # clap CLI: `stable` TUI entry + `stable claude-code hook *` subcommands
     app.rs              # App struct, state machine, event dispatch
     tui.rs              # ratatui + crossterm setup/teardown, panic hook
     config.rs           # TOML load/save, AgentConfig struct
     tmux.rs             # ensure_session, new_window, capture_pane, send_keys, liveness
-    models.rs           # AgentEntry, AgentStatus, AgentMeta, ContextInfo
+    models.rs           # AgentEntry, AgentStatus, AgentMeta, AgentHookState, ContextInfo
     agents/
       mod.rs            # AgentAdapter trait
-      claude.rs         # ClaudeAdapter (regex patterns)
-      opencode.rs       # OpenCodeAdapter (regex patterns)
+      claude.rs         # ClaudeAdapter: launch_command, parse_context_window (regex), hook subcommands
+      opencode.rs       # OpenCodeAdapter: launch_command, TBD
+    hook_state.rs       # read_state / write_state for ~/.local/share/stable/agents/<sid>.json
     ui/
       mod.rs
       dashboard.rs      # card grid, keybindings bar
