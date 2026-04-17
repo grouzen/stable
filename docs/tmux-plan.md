@@ -4,7 +4,9 @@
 
 `stable` — a single binary Rust TUI for managing a swarm of heterogeneous coding agents running in tmux panes.
 
-A dashboard for terminal junkies who run multiple CLI coding agents (Claude Code, OpenCode, Pi, etc.) in tmux and want a unified overview with snappy switching between agents.
+A dashboard for terminal junkies who run multiple CLI coding agents (Claude Code, OpenCode, etc.) in tmux and want a unified overview with snappy switching between agents.
+
+The only prerequisite for the user is having `tmux` installed. `stable` owns and manages the tmux session entirely — no manual tmux setup required.
 
 ---
 
@@ -13,8 +15,10 @@ A dashboard for terminal junkies who run multiple CLI coding agents (Claude Code
 | Topic | Decision |
 |---|---|
 | Project name | `stable` |
-| Session backend | tmux panes |
-| Agent config | `~/.config/stable/agents.toml` (persisted) |
+| Session backend | tmux windows (one agent per window, full screen) |
+| Session name | `stable` (fixed, created by stable on first launch) |
+| Session lifetime | Persists after stable exits; reattached on next launch |
+| Agent config | `~/.config/stable/agents.toml` (written by stable, not manually) |
 | Dashboard refresh | Per-agent adapters + regex parsing, 500ms interval |
 | Agent view refresh | 50ms live capture for near-real-time feel |
 | Agent view input | Full keyboard passthrough via `tmux send-keys` |
@@ -23,6 +27,9 @@ A dashboard for terminal junkies who run multiple CLI coding agents (Claude Code
 | tmux library | `tmux_interface` for `list_panes` + `send_keys`; raw `Command` for `capture_pane` |
 | TUI library | `ratatui` + `crossterm` |
 | ANSI rendering | `ansi-to-tui` for color-faithful rendering |
+| Agent types | `claude` and `opencode` only (no generic) |
+| Agent creation | Modal dialog in TUI: name + directory + agent type → creates tmux window + launches agent |
+| Attach to existing pane | Not supported; all agents created through stable |
 
 ---
 
@@ -30,16 +37,33 @@ A dashboard for terminal junkies who run multiple CLI coding agents (Claude Code
 
 ### Concept
 
-A single Rust binary that sits on top of **tmux**. Your coding agents run in tmux panes as normal. `stable` attaches to those panes, polls their output, extracts status metadata via per-agent adapters, and presents a unified dashboard. You can jump from the dashboard into any agent's full view with keyboard passthrough.
+A single Rust binary that owns a dedicated `stable` tmux session. On first launch, stable creates the session. On subsequent launches, it reattaches. Users create agents through a TUI dialog — stable opens a new tmux window with the chosen working directory, runs the agent CLI, and immediately switches to its AgentView.
+
+### Session Lifecycle
+
+```
+stable launches
+        ↓
+tmux has-session -t stable?
+    ├── NO  → tmux new-session -d -s stable   (background session, 1 empty window)
+    └── YES → reattach (session survived previous quit)
+        ↓
+stable TUI renders in user's current terminal (outside the managed session)
+        ↓
+user quits stable
+        ↓
+tmux session stays alive; agents keep running
+```
 
 ### tmux Integration Strategy
 
 ```rust
 // tmux_interface: structured data where parsing saves effort
-use tmux_interface::{ListPanes, SendKeys, Tmux};
+use tmux_interface::{NewSession, NewWindow, SendKeys, Tmux};
 
-// list_panes → typed Pane structs for the add-agent dialog
-// send_keys  → key encoding edge cases handled (arrows, ctrl-*, etc.)
+// ensure_session → create 'stable' session if absent
+// new_window     → open agent window with correct cwd
+// send_keys      → key encoding edge cases handled (arrows, ctrl-*, etc.)
 
 // std::process::Command: raw text output, no value in wrapping
 fn capture_pane(target: &str) -> anyhow::Result<String> {
@@ -52,12 +76,14 @@ fn capture_pane(target: &str) -> anyhow::Result<String> {
 
 ### tmux Operations
 
-| Operation | Implementation | Purpose |
+| Operation | Command | When |
 |---|---|---|
-| List panes | `tmux list-panes -a -F '#{...}'` | Enumerate panes for add-agent dialog |
-| Capture pane | `tmux capture-pane -t <id> -p -e -S -` | Get full scrollback with ANSI codes |
-| Send keys | `tmux send-keys -t <id> <key>` | Forward keyboard input to agent |
-| Check liveness | `tmux display-message -t <id> -p '#{pane_pid}'` | Verify pane/process still exists |
+| Ensure session | `tmux new-session -d -s stable` | Startup |
+| Create window | `tmux new-window -t stable -c <dir>` | CreateAgentDialog confirm |
+| Launch agent | `tmux send-keys -t <pane> "claude\n"` or `"opencode\n"` | Immediately after window creation |
+| Capture pane | `tmux capture-pane -t <id> -p -e -S -` | Dashboard + AgentView polling |
+| Send keys | `tmux send-keys -t <id> <key>` | AgentView passthrough |
+| Check liveness | `tmux display-message -t <id> -p '#{pane_pid}'` | Dashboard poller |
 
 ### Polling Architecture
 
@@ -75,21 +101,19 @@ Two independent refresh cycles using `tokio`:
 
 ```toml
 # ~/.config/stable/agents.toml
+# This file is written and managed by stable. Do not edit manually.
 
 [[agents]]
-name = "refactor-api"
-pane = "main:1.0"          # tmux target (session:window.pane)
-agent_type = "claude"      # claude | opencode | generic
+name = "my-refactor"
+pane = "stable:1.0"           # assigned by stable on creation
+agent_type = "claude"         # claude | opencode
+directory = "/home/user/projects/foo"
 
 [[agents]]
 name = "add-feature"
-pane = "work:0.1"
+pane = "stable:2.0"
 agent_type = "opencode"
-
-[[agents]]
-name = "pi-bot"
-pane = "main:2.0"
-agent_type = "generic"
+directory = "/home/user/projects/bar"
 ```
 
 Loaded on startup, written on every add/remove action.
@@ -103,6 +127,7 @@ Loaded on startup, written on every add/remove action.
 ```rust
 trait AgentAdapter {
     fn agent_type(&self) -> &str;
+    fn launch_command(&self) -> &str;
     fn parse_status(&self, output: &str) -> AgentStatus;
     fn parse_context_window(&self, output: &str) -> Option<ContextInfo>;
     fn parse_first_prompt(&self, output: &str) -> Option<String>;
@@ -113,11 +138,11 @@ trait AgentAdapter {
 ### AgentStatus Enum
 
 ```rust
-enum AgentStatus { 
-    Running, 
-    WaitingForInput, 
-    Stopped, 
-    Unknown 
+enum AgentStatus {
+    Running,
+    WaitingForInput,
+    Stopped,
+    Unknown
 }
 ```
 
@@ -135,15 +160,16 @@ Inferred heuristically per adapter.
 | Context window | Lines like `Context window: 42,341 / 200,000 tokens` |
 | First prompt | First line after banner/header that looks like user input |
 | Last prompt | Last occurrence of user-turn line before agent response |
+| Launch command | `claude` |
 
 **OpenCodeAdapter** (`opencode` binary)
 
-Similar structure — will be calibrated once we can observe its actual output format. Fallback to `GenericAdapter` if pattern doesn't match.
+Similar structure — will be calibrated once we can observe its actual output format.
 
-**GenericAdapter**
-
-- Status: running if `tmux display-message -p '#{pane_pid}'` process is alive, stopped otherwise
-- Context/prompts: `None`
+| Field | Pattern to match |
+|---|---|
+| Launch command | `opencode` |
+| Status / context / prompts | TBD — calibrated against live output |
 
 ---
 
@@ -153,14 +179,14 @@ Similar structure — will be calibrated once we can observe its actual output f
 
 ```
 ┌─ stable ───────────────────────────────────────────────────────┐
-│  [a] Add  [d] Delete  [Enter] Open  [q] Quit                   │
+│  [n] New  [d] Delete  [Enter] Open  [q] Quit                   │
 ├────────────────┬────────────────┬────────────────┬─────────────┤
-│ claude-code    │ opencode       │ pi-agent       │             │
-│ ● Running      │ ⏸ Waiting      │ ■ Stopped      │             │
-│ ctx: 42k/200k  │ ctx: 18k/128k  │ ctx: n/a       │             │
-│ first: "Refac… │ first: "Add f… │ first: "Setup… │             │
-│ last:  "Now w… │ last:  "What'… │ last:  n/a     │             │
-│ pane: main:1.0 │ pane: main:1.1 │ pane: work:0.0 │             │
+│ claude-code    │ opencode       │                │             │
+│ ● Running      │ ⏸ Waiting      │                │             │
+│ ctx: 42k/200k  │ ctx: 18k/128k  │                │             │
+│ first: "Refac… │ first: "Add f… │                │             │
+│ last:  "Now w… │ last:  "What'… │                │             │
+│ pane: stable:1 │ pane: stable:2 │                │             │
 └────────────────┴────────────────┴────────────────┴─────────────┘
 ```
 
@@ -171,16 +197,36 @@ Similar structure — will be calibrated once we can observe its actual output f
 - `Ctrl-g` returns to dashboard
 - Status bar at bottom: pane id, agent type, last refresh time
 
-### Add Agent Dialog
+### CreateAgentDialog
 
-- Shows a list of all current tmux panes (from `tmux list-panes -a`)
-- User picks a pane, assigns a name, picks agent type
-- Added to in-memory registry and saved to TOML
+Modal overlay on the dashboard:
 
-### Remove Agent Dialog
+```
+┌─── New Agent ──────────────────────────────┐
+│                                            │
+│  Name:       [my-refactor              ]   │
+│                                            │
+│  Directory:  [/home/user/projects/foo  ]   │
+│              Tab: path autocomplete        │
+│                                            │
+│  Agent:      ● claude                      │
+│              ○ opencode                    │
+│                                            │
+│  [Enter] Launch        [Esc] Cancel        │
+└────────────────────────────────────────────┘
+```
+
+- **Tab** on directory field: completes path via `std::fs::read_dir` (no subprocess)
+- **↑/↓** moves between fields
+- **Space** toggles agent type radio
+- All fields must be non-empty to enable Launch
+- On confirm: creates tmux window → sends agent command → transitions to `AgentView(new)`
+
+### RemoveAgentDialog
 
 - Confirm prompt before removing agent from registry
 - `y/Enter` confirms, `n/Esc` cancels
+- Does **not** kill the tmux window (session stays alive)
 
 ---
 
@@ -188,21 +234,21 @@ Similar structure — will be calibrated once we can observe its actual output f
 
 ```
 AppState
-  ├── Dashboard          # default view
-  │     ├── [a]          → AddAgentDialog
-  │     ├── [d]          → RemoveAgentDialog
-  │     └── [Enter]      → AgentView(selected)
+  ├── Dashboard                  # default view
+  │     ├── [n]     → CreateAgentDialog
+  │     ├── [d]     → RemoveAgentDialog
+  │     └── [Enter] → AgentView(selected)
   │
-  ├── AgentView(id)      # full pane render + passthrough
-  │     └── [Ctrl-g]     → Dashboard
+  ├── CreateAgentDialog          # name + dir + agent type modal
+  │     ├── [Enter] → new_window() + send-keys(agent cmd) → AgentView(new)
+  │     └── [Esc]   → Dashboard (cancelled)
   │
-  ├── AddAgentDialog     # pane picker + name + type
-  │     ├── [Enter]      → Dashboard (agent added + saved)
-  │     └── [Esc]        → Dashboard (cancelled)
+  ├── AgentView(id)              # full pane render + passthrough
+  │     └── [Ctrl-g] → Dashboard
   │
-  └── RemoveAgentDialog  # confirm prompt
-        ├── [y/Enter]    → Dashboard (agent removed + saved)
-        └── [n/Esc]      → Dashboard (cancelled)
+  └── RemoveAgentDialog          # confirm prompt
+        ├── [y/Enter] → Dashboard (agent removed + saved)
+        └── [n/Esc]   → Dashboard (cancelled)
 ```
 
 ---
@@ -217,18 +263,17 @@ stable/
     app.rs              # App struct, state machine, event dispatch
     tui.rs              # ratatui + crossterm setup/teardown, panic hook
     config.rs           # TOML load/save, AgentConfig struct
-    tmux.rs             # capture_pane() via Command; list_panes/send_keys via tmux_interface
+    tmux.rs             # ensure_session, new_window, capture_pane, send_keys, liveness
     models.rs           # AgentEntry, AgentStatus, AgentMeta, ContextInfo
     agents/
       mod.rs            # AgentAdapter trait
       claude.rs         # ClaudeAdapter (regex patterns)
       opencode.rs       # OpenCodeAdapter (regex patterns)
-      generic.rs        # GenericAdapter (process liveness only)
     ui/
       mod.rs
       dashboard.rs      # card grid, keybindings bar
       agent_view.rs     # ansi-to-tui render + scrollback state
-      add_agent.rs      # pane list picker, name input, type selector
+      create_agent.rs   # name input, dir input w/ Tab-completion, agent radio
       remove_agent.rs   # confirm dialog
 ```
 
@@ -272,38 +317,32 @@ dirs             = "5"     # for ~/.config resolution
 
 1. **Scaffold** — `cargo new stable`, deps, `tui.rs` boilerplate (enter/leave alternate screen, raw mode, panic hook to restore terminal on crash)
 
-2. **tmux layer** — `capture_pane()`, `list_panes()`, `send_keys()` wrappers; pane liveness check using `display-message`
+2. **tmux layer** — `ensure_session()`, `new_window()`, `capture_pane()`, `send_keys()`, liveness check via `display-message`
 
-3. **Config layer** — TOML load/save, `~/.config/stable/` directory creation, `AgentConfig` struct
+3. **Config layer** — TOML load/save, `~/.config/stable/` directory creation, `AgentConfig` struct with `directory` field
 
-4. **Models + GenericAdapter** — `AgentStatus`, `AgentMeta`, `ContextInfo` structs; liveness-only adapter
+4. **Models** — `AgentStatus`, `AgentMeta`, `ContextInfo` structs
 
-5. **Dashboard view** — card grid with placeholder data, keybindings bar at top
+5. **Dashboard view** — card grid with placeholder data, keybindings bar (`[n] [d] [Enter] [q]`)
 
 6. **Agent view** — `ansi-to-tui` render of full scrollback, `Ctrl-g` escape back to dashboard
 
 7. **Keyboard passthrough** — `send_keys` forwarding in agent view, special-key mapping (arrows, Enter, Ctrl-*)
 
-8. **Add/Remove agent dialogs** — pane picker list widget, name input field, agent type selector, confirmation dialog
+8. **CreateAgentDialog** — name input, directory input with Tab-completion, agent type radio, creates tmux window + sends agent command on confirm, transitions to AgentView
 
-9. **ClaudeAdapter + OpenCodeAdapter** — real regex patterns, calibrated against live output from actual agents
+9. **RemoveAgentDialog** — confirm prompt, removes from registry and config
 
-10. **Polish** — error states (pane gone, tmux not running), refresh timestamp in status bar, `?` help overlay with keybindings
+10. **ClaudeAdapter + OpenCodeAdapter** — real regex patterns calibrated against live output
 
----
-
-## Open Questions / Tradeoffs
-
-- **Persistence**: Agent registry saved to `~/.config/stable/agents.toml` — survives restarts
-- **Pane content scrollback**: `capture-pane -S -` captures the visible pane + full history; agent view will render it all
-- **Error handling**: If a pane is killed externally, adapter marks it as `Stopped` and shows error in card; user can remove it manually
+11. **Polish** — dead pane handling (mark Stopped, show error in card), refresh timestamp in status bar, `?` help overlay
 
 ---
 
-## Why This Architecture?
+## Design Notes
 
-- **Attach to existing sessions**: No need to launch agents through `stable` — just point at running tmux panes
-- **Per-agent adapters**: Different agents have different output formats; plugins make it extensible
-- **Live in TUI**: Add/remove agents interactively without editing TOML manually
-- **Full keyboard passthrough**: When focused on an agent, you interact with it exactly as if you'd switched to the tmux pane directly
-- **Minimal dependencies on tmux internals**: Only uses documented CLI commands, no tmux server socket/control mode complexity
+- **No manual tmux setup**: stable creates and owns the `stable` tmux session. User only needs `tmux` in PATH.
+- **Session survives stable**: Quitting stable leaves agents running. Re-launching stable reattaches to the existing session and re-reads config.
+- **No pty handling in stable**: All terminal emulation is delegated to tmux. stable only reads `capture-pane` output and writes via `send-keys`.
+- **One window per agent**: Each agent gets a dedicated tmux window (full screen), making `capture-pane` targeting unambiguous.
+- **Config is stable-owned**: `agents.toml` is written by stable on every create/remove. Users should not edit it manually.
