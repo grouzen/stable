@@ -197,6 +197,27 @@ Similar structure — will be calibrated once we can observe its actual output f
 - `Ctrl-g` returns to dashboard
 - Status bar at bottom: pane id, agent type, last refresh time
 
+#### Agent Stopped Overlay
+
+When the 50ms poller detects `AgentStatus::Stopped` while in `AgentView`, an overlay is
+rendered on top of the pane content:
+
+```
+┌──────────────────────────────────────────┐
+│                                          │
+│   Agent stopped.                         │
+│                                          │
+│   [d] Remove agent   [Ctrl-g] Dashboard  │
+│                                          │
+└──────────────────────────────────────────┘
+```
+
+- Overlay is shown on the **first poll cycle** that transitions the agent into `Stopped`
+  (edge detection — not shown on every tick)
+- Keypresses are **not** forwarded to tmux while the overlay is visible
+- `[d]` removes the agent from the registry, saves config, and returns to Dashboard
+- `[Ctrl-g]` dismisses the overlay and returns to Dashboard (agent card remains, shown as `■ Stopped`)
+
 ### CreateAgentDialog
 
 Modal overlay on the dashboard:
