@@ -27,7 +27,6 @@ pub enum AppState {
 #[derive(Debug)]
 pub enum Event {
     Key(KeyEvent),
-    Resize(u16, u16),
     DashboardTick,
     AgentViewTick,
 }
@@ -211,9 +210,7 @@ impl App {
                     CEvent::Key(k) => {
                         let _ = tx.send(Event::Key(k));
                     }
-                    CEvent::Resize(w, h) => {
-                        let _ = tx.send(Event::Resize(w, h));
-                    }
+
                     _ => {}
                 }
             }
@@ -248,7 +245,6 @@ impl App {
     pub async fn handle_event(&mut self, event: Event) -> bool {
         match event {
             Event::Key(key) => self.handle_key(key).await,
-            Event::Resize(_, _) => true,
             Event::DashboardTick => {
                 self.handle_dashboard_tick().await;
                 true
@@ -352,7 +348,20 @@ impl App {
                 self.agent_view_state.update_lines(&raw);
             }
 
-            // Update status
+            // If the pane is no longer alive, immediately mark as Stopped
+            if !tmux::is_alive(&pane) {
+                let prev = self.agent_view_state.prev_status.clone();
+                if prev.as_ref() != Some(&AgentStatus::Stopped) {
+                    self.agent_view_state.show_stopped_overlay = true;
+                }
+                self.agent_view_state.prev_status = Some(AgentStatus::Stopped.clone());
+                if let Some(e) = self.agents.get_mut(idx) {
+                    e.meta.status = AgentStatus::Stopped;
+                }
+                return;
+            }
+
+            // Update status via adapter
             if let Some(adapter) = self.adapters.get(idx) {
                 let new_status = adapter.get_status().await;
                 let prev = self.agent_view_state.prev_status.clone();
