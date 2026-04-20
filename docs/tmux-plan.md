@@ -114,6 +114,8 @@ name = "add-feature"
 pane = "stable:2.0"
 agent_type = "opencode"
 directory = "/home/user/projects/bar"
+port = 14101                       # opencode HTTP server port, assigned by stable
+session_id = "sess_abc123"         # opencode internal session UUID, created by stable
 ```
 
 Loaded on startup, written on every add/remove action.
@@ -125,17 +127,19 @@ Loaded on startup, written on every add/remove action.
 ### AgentAdapter Trait
 
 ```rust
+#[async_trait]
 trait AgentAdapter {
     fn agent_type(&self) -> &str;
-    fn launch_command(&self) -> &str;
-    fn get_status(&self, session_id: &str) -> AgentStatus;
-    fn get_context(&self, session_id: &str) -> Option<ContextInfo>;
-    fn get_first_prompt(&self, session_id: &str) -> Option<String>;
-    fn get_last_prompt(&self, session_id: &str) -> Option<String>;
+    async fn get_status(&self) -> AgentStatus;
+    async fn get_context(&self) -> Option<ContextInfo>;
+    async fn get_first_prompt(&self) -> Option<String>;
+    async fn get_last_prompt(&self) -> Option<String>;
 }
 ```
 
-Each adapter decides its own data source. `session_id` is the agent session identifier used to locate the agent's state. For `ClaudeAdapter`, the `get_status`, `get_first_prompt`, and `get_last_prompt` methods read from the hook-written state file at `~/.local/share/stable/agents/<session_id>.json`; `get_context` falls back to regex on `capture_pane` output since Claude Code's hooks do not expose token counts.
+Each adapter is instantiated once per agent and owns its identity internally — no `session_id` parameter is threaded through method calls. The poller holds a `Box<dyn AgentAdapter>` (or `Arc<dyn AgentAdapter + Send + Sync>`) per registered agent and calls these methods directly. Methods are `async` because `OpenCodeAdapter` makes HTTP requests; `ClaudeAdapter` does file I/O that can also be async.
+
+For `ClaudeAdapter`, `get_status`, `get_first_prompt`, and `get_last_prompt` read from the hook-written state file at `~/.local/share/stable/agents/<session_id>.json` (where `session_id` is stored in the struct); `get_context` falls back to regex on `capture_pane` output since Claude Code's hooks do not expose token counts.
 
 ### AgentStatus Enum
 
@@ -164,13 +168,22 @@ struct AgentHookState {
 
 **ClaudeAdapter** (`claude` binary)
 
+Struct:
+
+```rust
+pub struct ClaudeAdapter {
+    session_id: String,  // stable's identifier; used to locate the hook state file
+}
+```
+
 | Method | Data source |
 |---|---|
 | `get_status` | Reads `~/.local/share/stable/agents/<session_id>.json` written by hook subcommands |
 | `get_first_prompt` | Same state file |
 | `get_last_prompt` | Same state file |
 | `get_context` | Regex on `capture_pane` output: `Context window: 42,341 / 200,000 tokens` |
-| `launch_command` | `claude` |
+
+Launch command (used at creation time, not part of the trait): `claude`
 
 Hook subcommands read JSON from stdin (as delivered by Claude Code) and update the state file:
 
@@ -207,10 +220,60 @@ The hooks block installed into `~/.claude/settings.json`:
 
 **OpenCodeAdapter** (`opencode` binary)
 
-| Field | Source |
-|---|---|
-| Launch command | `opencode` |
-| Status / context / prompts | TBD — hooks or stdout parsing calibrated against live output |
+Stable launches opencode with a fixed, pre-assigned port and uses opencode's HTTP RESTful API for all data. The opencode internal session ID is created by stable at agent creation time and stored in `agents.toml`.
+
+Struct:
+
+```rust
+pub struct OpenCodeAdapter {
+    port: u16,
+    directory: String,
+    session_id: String,           // internal opencode UUID, created via POST /session
+    client: reqwest::Client,      // reused across calls
+}
+```
+
+| Method | API call | Logic |
+|---|---|---|
+| `get_status` | `GET /session/status` | Find `session_id` in the map → `busy`/`retry` → `Running`; `idle` → `WaitingForInput`; connection refused → `Stopped` |
+| `get_context` | `GET /session/{id}/message`, `GET /config`, `GET /provider` | Latest `AssistantMessage.tokens` summed → `used`; `config.model` → provider lookup → `limit.context` → `total` |
+| `get_first_prompt` | `GET /session/{id}/message` | First entry where `info.role == "user"` → first `TextPart.text` |
+| `get_last_prompt` | `GET /session/{id}/message` | Last entry where `info.role == "user"` → first `TextPart.text` |
+
+Launch command (used at creation time): `opencode --port <N>`
+
+**Agent creation flow** (opencode-specific steps after tmux window is ready):
+
+```
+1. Assign port: next available starting from 14100; store in AgentConfig
+2. tmux send-keys: "opencode --port <N>\n"
+3. Retry GET http://127.0.0.1:<N>/global/health every 200ms (up to 5s) until { healthy: true }
+4. POST http://127.0.0.1:<N>/session  {}
+   → Session { id: "sess_..." }
+5. Store session_id in AgentConfig; save agents.toml
+6. Transition to AgentView
+```
+
+**`get_context` detail:**
+
+```
+GET /session/{id}/message
+  → filter AssistantMessage (role = "assistant") entries
+  → take the latest by time.created
+  → used = tokens.input + tokens.output + tokens.cache.read + tokens.cache.write
+
+GET /config
+  → config.model e.g. "anthropic/claude-sonnet-4-5"
+  → split on "/" → providerID="anthropic", modelID="claude-sonnet-4-5"
+
+GET /provider
+  → find provider where id == providerID
+  → find model where key == modelID
+  → total = model.limit.context
+
+→ Some(ContextInfo { used, total })
+→ None if any step fails or no assistant message exists yet
+```
 
 ---
 
@@ -359,6 +422,8 @@ toml             = "0.8"
 anyhow           = "1"
 clap             = { version = "4", features = ["derive"] }
 dirs             = "5"     # for ~/.config resolution
+reqwest          = { version = "0.12", features = ["json"] }
+async-trait      = "0.1"
 ```
 
 | Crate | Purpose |
@@ -373,6 +438,8 @@ dirs             = "5"     # for ~/.config resolution
 | `anyhow` | Error handling |
 | `clap` | CLI args parser |
 | `dirs` | Cross-platform config dir resolution |
+| `reqwest` | Async HTTP client for OpenCode REST API |
+| `async-trait` | `async fn` in trait definitions |
 
 ---
 
