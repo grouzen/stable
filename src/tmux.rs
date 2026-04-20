@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::Command;
-use tmux_interface::{HasSession, NewSession, NewWindow, SendKeys, Tmux};
+use tmux_interface::{NewWindow, SendKeys, Tmux};
 
 const SESSION: &str = "stable";
 
@@ -26,14 +26,18 @@ pub fn sanitize_name(s: &str) -> String {
 }
 
 /// Ensure the `stable` tmux session exists; create it detached if not.
+/// Uses raw `Command` so that a tmux server is started automatically when
+/// none is running (tmux_interface's `HasSession` errors out in that case).
 pub fn ensure_session() -> Result<()> {
-    let has = Tmux::with_command(HasSession::new().target_session(SESSION).build())
+    let has = Command::new("tmux")
+        .args(["has-session", "-t", SESSION])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
 
     if !has {
-        Tmux::with_command(NewSession::new().detached().session_name(SESSION).build())
+        Command::new("tmux")
+            .args(["new-session", "-d", "-s", SESSION])
             .status()
             .context("failed to create tmux session")?;
     }

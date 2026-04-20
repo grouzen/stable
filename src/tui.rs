@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::{stdout, Stdout};
 use std::panic;
 
@@ -31,18 +32,14 @@ pub fn install_panic_hook() {
     }));
 }
 
-pub fn run<F>(mut f: F) -> Result<()>
+pub async fn run<F, Fut>(f: F) -> Result<()>
 where
-    F: FnMut(&mut Tui) -> Result<bool>,
+    F: FnOnce(Tui) -> Fut,
+    Fut: Future<Output = Result<()>>,
 {
     install_panic_hook();
-    let mut terminal = enter_terminal()?;
-    loop {
-        let should_quit = f(&mut terminal)?;
-        if should_quit {
-            break;
-        }
-    }
+    let terminal = enter_terminal()?;
+    let result = f(terminal).await;
     leave_terminal()?;
-    Ok(())
+    result
 }
