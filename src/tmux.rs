@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crossterm::terminal;
 use regex::Regex;
 use std::process::Command;
 use tmux_interface::{NewWindow, SendKeys, Tmux};
@@ -36,8 +37,20 @@ pub fn ensure_session() -> Result<()> {
         .unwrap_or(false);
 
     if !has {
+        // Create the session detached with the current terminal size so panes
+        // aren't stuck at the tmux default (80×24).
+        let (cols, rows) = terminal::size().unwrap_or((220, 50));
         Command::new("tmux")
-            .args(["new-session", "-d", "-s", SESSION])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                SESSION,
+                "-x",
+                &cols.to_string(),
+                "-y",
+                &rows.to_string(),
+            ])
             .status()
             .context("failed to create tmux session")?;
     }
@@ -85,6 +98,23 @@ pub fn capture_pane(target: &str) -> Result<String> {
         .output()
         .with_context(|| format!("failed to capture pane {}", target))?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Resize a tmux window to the given dimensions.
+pub fn resize_window(target: &str, width: u16, height: u16) -> Result<()> {
+    Command::new("tmux")
+        .args([
+            "resize-window",
+            "-t",
+            target,
+            "-x",
+            &width.to_string(),
+            "-y",
+            &height.to_string(),
+        ])
+        .status()
+        .with_context(|| format!("failed to resize window {}", target))?;
+    Ok(())
 }
 
 /// Check whether a pane is alive by querying its pid.
