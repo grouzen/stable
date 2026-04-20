@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -24,73 +24,63 @@ pub fn render_dashboard(f: &mut Frame, area: Rect, agents: &[AgentEntry], select
 
     render_keybindings_bar(f, bar_area);
 
-    if agents.is_empty() {
-        render_empty_state(f, main_area);
-    } else {
-        render_grid(f, main_area, agents, selected);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Empty state
-// ---------------------------------------------------------------------------
-
-fn render_empty_state(f: &mut Frame, area: Rect) {
-    let msg = Paragraph::new("No agents. Press [n] to create one.")
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::DarkGray));
-
-    // Vertically center by adding top margin
-    let vert = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(45),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    f.render_widget(msg, vert[1]);
+    render_grid(f, main_area, agents, selected);
 }
 
 // ---------------------------------------------------------------------------
 // Grid
 // ---------------------------------------------------------------------------
 
-fn grid_dim(n: usize) -> usize {
-    if n <= 4 {
-        2
-    } else if n <= 9 {
-        3
+/// Returns (cols, rows) for the grid based on the number of agents.
+///
+/// Layout progression:
+///   0–2  agents → 2×1  (2 cols, 1 row)
+///   3    agents → 3×1  (3 cols, 1 row)
+///   4–6  agents → 3×2  (3 cols, 2 rows)
+///   7–8  agents → 4×2  (4 cols, 2 rows)
+///   9–12 agents → 4×3  (4 cols, 3 rows)
+///  13–16 agents → 4×4  (4 cols, 4 rows)
+fn grid_layout(n: usize) -> (usize, usize) {
+    if n <= 2 {
+        (2, 1)
+    } else if n <= 3 {
+        (3, 1)
+    } else if n <= 6 {
+        (3, 2)
+    } else if n <= 8 {
+        (4, 2)
+    } else if n <= 12 {
+        (4, 3)
     } else {
-        4
+        (4, 4)
     }
 }
 
 fn render_grid(f: &mut Frame, area: Rect, agents: &[AgentEntry], selected: usize) {
-    let dim = grid_dim(agents.len());
-    let total_slots = dim * dim;
+    let (cols, rows) = grid_layout(agents.len());
+    let total_slots = cols * rows;
 
-    // Build equal row/column constraints
-    let col_constraints: Vec<Constraint> =
-        (0..dim).map(|_| Constraint::Ratio(1, dim as u32)).collect();
-    let row_constraints: Vec<Constraint> =
-        (0..dim).map(|_| Constraint::Ratio(1, dim as u32)).collect();
+    let col_constraints: Vec<Constraint> = (0..cols)
+        .map(|_| Constraint::Ratio(1, cols as u32))
+        .collect();
+    let row_constraints: Vec<Constraint> = (0..rows)
+        .map(|_| Constraint::Ratio(1, rows as u32))
+        .collect();
 
-    let rows = Layout::default()
+    let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(row_constraints)
         .split(area);
 
-    for row in 0..dim {
-        let cols = Layout::default()
+    for row in 0..rows {
+        let col_areas = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(col_constraints.clone())
-            .split(rows[row]);
+            .split(row_areas[row]);
 
-        for col in 0..dim {
-            let slot = row * dim + col;
-            let cell_area = cols[col];
+        for col in 0..cols {
+            let slot = row * cols + col;
+            let cell_area = col_areas[col];
 
             if slot < agents.len() {
                 render_card(f, cell_area, &agents[slot], slot == selected);
