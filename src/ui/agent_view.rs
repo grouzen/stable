@@ -53,6 +53,20 @@ pub fn render_agent_view(
     let para = Paragraph::new(text);
     f.render_widget(para, content_area);
 
+    // Forward the pane cursor so the user sees it (live mode only; hide when scrolled).
+    if state.scroll_offset == 0 && !state.show_stopped_overlay {
+        if let Some((cx, cy)) = state.cursor {
+            let screen_x = content_area.x.saturating_add(cx);
+            let screen_y = content_area.y.saturating_add(cy);
+            // Only set if within the content area bounds.
+            if screen_x < content_area.x + content_area.width
+                && screen_y < content_area.y + content_area.height
+            {
+                f.set_cursor_position((screen_x, screen_y));
+            }
+        }
+    }
+
     // Status bar
     let refresh_str = if let Some(instant) = state.last_refresh {
         // Format elapsed as HH:MM:SS using system time

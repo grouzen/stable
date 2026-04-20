@@ -41,13 +41,15 @@ pub struct AgentViewState {
     pub scroll_offset: usize,
     pub last_refresh: Option<std::time::Instant>,
     pub show_stopped_overlay: bool,
+    /// Cursor position within the pane's visible screen (col, row).
+    pub cursor: Option<(u16, u16)>,
     /// Track previous status to detect edge transitions
     prev_status: Option<AgentStatus>,
 }
 
 impl AgentViewState {
     pub fn update_lines(&mut self, raw: &str) {
-        let new_lines: Vec<String> = raw.split('\n').map(|s| s.to_string()).collect();
+        let new_lines: Vec<String> = raw.trim_end_matches('\n').split('\n').map(|s| s.to_string()).collect();
         let new_count = new_lines.len();
         self.lines = new_lines;
         self.last_refresh = Some(std::time::Instant::now());
@@ -347,6 +349,7 @@ impl App {
             if let Ok(raw) = tmux::capture_pane(&pane) {
                 self.agent_view_state.update_lines(&raw);
             }
+            self.agent_view_state.cursor = tmux::cursor_position(&pane);
 
             // If the pane is no longer alive, immediately mark as Stopped
             if !tmux::is_alive(&pane) {

@@ -117,6 +117,25 @@ pub fn resize_window(target: &str, width: u16, height: u16) -> Result<()> {
     Ok(())
 }
 
+/// Return the cursor position within the pane's visible screen as (col, row).
+pub fn cursor_position(target: &str) -> Option<(u16, u16)> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-t",
+            target,
+            "-p",
+            "#{cursor_x} #{cursor_y}",
+        ])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    let mut parts = s.trim().split_whitespace();
+    let x: u16 = parts.next()?.parse().ok()?;
+    let y: u16 = parts.next()?.parse().ok()?;
+    Some((x, y))
+}
+
 /// Check whether a pane is alive by querying its pid.
 pub fn is_alive(target: &str) -> bool {
     Command::new("tmux")
