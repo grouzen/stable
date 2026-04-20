@@ -1,0 +1,19 @@
+[package]
+name = "stable"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui          = "0.29"
+crossterm        = "0.28"
+ansi-to-tui      = "4"
+tokio            = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tmux_interface   = { version = "0.4", default-features = false, features = ["tmux_3_3a"] }
+regex            = "1"
+serde            = { version = "1", features = ["derive"] }
+toml             = "0.8"
+anyhow           = "1"
+clap             = { version = "4", features = ["derive"] }
+dirs             = "5"
+reqwest          = { version = "0.12", features = ["json"] }
+async-trait      = "0.1"
