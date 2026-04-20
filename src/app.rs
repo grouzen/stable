@@ -435,7 +435,6 @@ impl App {
                                 agent_type: "opencode".to_string(),
                                 directory: dir,
                                 port: adapter.port,
-                                session_id: adapter.session_id.clone(),
                             };
                             self.config.agents.push(config.clone());
                             let _ = self.config.save();

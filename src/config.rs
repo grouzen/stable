@@ -9,7 +9,6 @@ pub struct AgentConfig {
     pub agent_type: String,
     pub directory: String,
     pub port: u16,
-    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
