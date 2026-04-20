@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 ratatui          = "0.29"
-crossterm        = "0.28"
+crossterm        = { version = "0.28", features = ["event-stream"] }
 ansi-to-tui      = "4"
 tokio            = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tmux_interface   = { version = "0.4", default-features = false, features = ["tmux_3_3a"] }
@@ -18,3 +18,4 @@ dirs             = "5"
 reqwest          = { version = "0.12", features = ["json"] }
 serde_json       = "1"
 async-trait      = "0.1"
+futures          = "0.3"
