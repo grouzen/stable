@@ -1,3 +1,5 @@
+mod config;
+mod models;
 mod tmux;
 mod tui;
 
