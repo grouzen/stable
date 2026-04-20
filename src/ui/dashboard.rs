@@ -40,7 +40,7 @@ pub fn render_dashboard(f: &mut Frame, area: Rect, agents: &[AgentEntry], select
 ///   7–8  agents → 4×2  (4 cols, 2 rows)
 ///   9–12 agents → 4×3  (4 cols, 3 rows)
 ///  13–16 agents → 4×4  (4 cols, 4 rows)
-fn grid_layout(n: usize) -> (usize, usize) {
+pub fn grid_layout(n: usize) -> (usize, usize) {
     if n <= 2 {
         (2, 1)
     } else if n <= 3 {
@@ -233,7 +233,7 @@ fn render_card(f: &mut Frame, area: Rect, entry: &AgentEntry, is_selected: bool)
 // ---------------------------------------------------------------------------
 
 fn render_keybindings_bar(f: &mut Frame, area: Rect) {
-    let bar = Paragraph::new("[n] New  [d] Delete  [Enter] Open  [q] Quit")
+    let bar = Paragraph::new("[n] New  [d] Delete  [Enter] Open  [←↓↑→/hjkl] Navigate  [q] Quit")
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(bar, area);
 }

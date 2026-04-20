@@ -7,6 +7,7 @@ use crate::agents::AgentAdapter;
 use crate::config::{AgentConfig, Config};
 use crate::models::{AgentEntry, AgentMeta, AgentStatus};
 use crate::tmux;
+use crate::ui::dashboard::grid_layout;
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -299,18 +300,36 @@ impl App {
                     self.state = AppState::AgentView(self.selected);
                 }
             }
-            KeyCode::Left => {
+            KeyCode::Left | KeyCode::Char('h') => {
                 if !self.agents.is_empty() {
-                    if self.selected == 0 {
-                        self.selected = self.agents.len() - 1;
-                    } else {
+                    let (cols, _) = grid_layout(self.agents.len());
+                    if self.selected % cols > 0 {
                         self.selected -= 1;
                     }
                 }
             }
-            KeyCode::Right => {
+            KeyCode::Right | KeyCode::Char('l') => {
                 if !self.agents.is_empty() {
-                    self.selected = (self.selected + 1) % self.agents.len();
+                    let (cols, _) = grid_layout(self.agents.len());
+                    if self.selected % cols < cols - 1 && self.selected + 1 < self.agents.len() {
+                        self.selected += 1;
+                    }
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if !self.agents.is_empty() {
+                    let (cols, _) = grid_layout(self.agents.len());
+                    if self.selected >= cols {
+                        self.selected -= cols;
+                    }
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !self.agents.is_empty() {
+                    let (cols, _) = grid_layout(self.agents.len());
+                    if self.selected + cols < self.agents.len() {
+                        self.selected += cols;
+                    }
                 }
             }
             _ => {}
