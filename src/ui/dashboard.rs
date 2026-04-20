@@ -57,8 +57,23 @@ fn grid_layout(n: usize) -> (usize, usize) {
 }
 
 fn render_grid(f: &mut Frame, area: Rect, agents: &[AgentEntry], selected: usize) {
+    if agents.is_empty() {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Ratio(1, 2),
+                Constraint::Length(1),
+                Constraint::Ratio(1, 2),
+            ])
+            .split(area);
+        let msg = Paragraph::new("No agents. Press [n] to create one.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(msg, chunks[1]);
+        return;
+    }
+
     let (cols, rows) = grid_layout(agents.len());
-    let total_slots = cols * rows;
 
     let col_constraints: Vec<Constraint> = (0..cols)
         .map(|_| Constraint::Ratio(1, cols as u32))
@@ -84,11 +99,8 @@ fn render_grid(f: &mut Frame, area: Rect, agents: &[AgentEntry], selected: usize
 
             if slot < agents.len() {
                 render_card(f, cell_area, &agents[slot], slot == selected);
-            } else if slot < total_slots {
-                // Empty slot — plain bordered block
-                let block = Block::default().borders(Borders::ALL);
-                f.render_widget(block, cell_area);
             }
+            // Empty slots render as blank (no border)
         }
     }
 }
