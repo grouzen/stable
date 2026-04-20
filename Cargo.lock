@@ -1538,6 +1538,7 @@ dependencies = [
  "regex",
  "reqwest",
  "serde",
+ "serde_json",
  "tmux_interface",
  "tokio",
  "toml",

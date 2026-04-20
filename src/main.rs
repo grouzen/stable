@@ -1,3 +1,4 @@
+mod agents;
 mod config;
 mod models;
 mod tmux;
