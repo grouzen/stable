@@ -43,7 +43,20 @@ pub fn render_agent_view(
         .into_text()
         .unwrap_or_else(|_| ratatui::text::Text::raw(visible_text.clone()));
 
-    let para = Paragraph::new(text);
+    // Use the first background colour found in the parsed ANSI content as the
+    // base style for the paragraph.  Cells that carry no explicit background
+    // code (e.g. default-colour spaces around a modal overlay) will then
+    // inherit the pane's own background rather than stable's terminal default.
+    let base_bg = text
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .find_map(|s| s.style.bg);
+    let base_style = match base_bg {
+        Some(bg) => Style::default().bg(bg),
+        None => Style::default(),
+    };
+    let para = Paragraph::new(text).style(base_style);
     f.render_widget(para, content_area);
 
     // Forward the pane cursor.
