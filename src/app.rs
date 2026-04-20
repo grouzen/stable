@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::{interval, Duration};
 
@@ -27,6 +27,7 @@ pub enum AppState {
 #[derive(Debug)]
 pub enum Event {
     Key(KeyEvent),
+    Mouse(MouseEvent),
     DashboardTick,
     AgentViewTick,
 }
@@ -194,6 +195,9 @@ impl App {
                     CEvent::Key(k) => {
                         let _ = tx.send(Event::Key(k));
                     }
+                    CEvent::Mouse(m) => {
+                        let _ = tx.send(Event::Mouse(m));
+                    }
 
                     _ => {}
                 }
@@ -229,6 +233,10 @@ impl App {
     pub async fn handle_event(&mut self, event: Event) -> bool {
         match event {
             Event::Key(key) => self.handle_key(key).await,
+            Event::Mouse(mouse) => {
+                self.handle_mouse(mouse);
+                true
+            }
             Event::DashboardTick => {
                 self.handle_dashboard_tick().await;
                 true
@@ -237,6 +245,20 @@ impl App {
                 self.handle_agent_view_tick().await;
                 true
             }
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let AppState::AgentView(idx) = self.state else {
+            return;
+        };
+        let keys = match mouse.kind {
+            MouseEventKind::ScrollUp => "PPage",
+            MouseEventKind::ScrollDown => "NPage",
+            _ => return,
+        };
+        if let Some(entry) = self.agents.get(idx) {
+            let _ = tmux::send_keys(&entry.config.pane, keys);
         }
     }
 
