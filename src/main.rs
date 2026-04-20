@@ -1,3 +1,4 @@
+mod tmux;
 mod tui;
 
 fn main() {
