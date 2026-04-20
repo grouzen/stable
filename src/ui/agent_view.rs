@@ -27,21 +27,14 @@ pub fn render_agent_view(
 
     let viewport_height = content_area.height as usize;
 
-    // Compute visible line slice
+    // Show the last viewport_height lines (live — scrolling is handled by tmux/opencode).
     let lines = &state.lines;
     let total = lines.len();
-
     let visible_text = if total == 0 {
         String::new()
-    } else if state.scroll_offset == 0 {
-        // Live: show last viewport_height lines
+    } else {
         let start = total.saturating_sub(viewport_height);
         lines[start..].join("\n")
-    } else {
-        // Scrolled: offset is lines-from-bottom
-        let end = total.saturating_sub(state.scroll_offset);
-        let start = end.saturating_sub(viewport_height);
-        lines[start..end].join("\n")
     };
 
     // Parse ANSI escape sequences into styled ratatui Text
@@ -53,12 +46,11 @@ pub fn render_agent_view(
     let para = Paragraph::new(text);
     f.render_widget(para, content_area);
 
-    // Forward the pane cursor so the user sees it (live mode only; hide when scrolled).
-    if state.scroll_offset == 0 && !state.show_stopped_overlay {
+    // Forward the pane cursor.
+    if !state.show_stopped_overlay {
         if let Some((cx, cy)) = state.cursor {
             let screen_x = content_area.x.saturating_add(cx);
             let screen_y = content_area.y.saturating_add(cy);
-            // Only set if within the content area bounds.
             if screen_x < content_area.x + content_area.width
                 && screen_y < content_area.y + content_area.height
             {
@@ -69,10 +61,8 @@ pub fn render_agent_view(
 
     // Status bar
     let refresh_str = if let Some(instant) = state.last_refresh {
-        // Format elapsed as HH:MM:SS using system time
         let elapsed = instant.elapsed();
         let secs = elapsed.as_secs();
-        // Use wall-clock time via SystemTime
         if let Ok(sys_now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
             let wall_secs = sys_now.as_secs().saturating_sub(secs);
             let h = (wall_secs / 3600) % 24;
@@ -86,15 +76,9 @@ pub fn render_agent_view(
         "--:--:--".to_string()
     };
 
-    let scrolled_indicator = if state.scroll_offset > 0 {
-        "  [scrolled]"
-    } else {
-        ""
-    };
-
     let status_text = format!(
-        "pane: {} | {} | last refresh {}{}",
-        agent_entry.config.pane, agent_entry.config.agent_type, refresh_str, scrolled_indicator
+        "pane: {} | {} | last refresh {}",
+        agent_entry.config.pane, agent_entry.config.agent_type, refresh_str
     );
 
     let status_bar = Paragraph::new(status_text).style(Style::default().fg(Color::DarkGray));

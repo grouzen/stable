@@ -38,7 +38,6 @@ pub enum Event {
 #[derive(Debug, Default)]
 pub struct AgentViewState {
     pub lines: Vec<String>,
-    pub scroll_offset: usize,
     pub last_refresh: Option<std::time::Instant>,
     pub show_stopped_overlay: bool,
     /// Cursor position within the pane's visible screen (col, row).
@@ -50,25 +49,8 @@ pub struct AgentViewState {
 impl AgentViewState {
     pub fn update_lines(&mut self, raw: &str) {
         let new_lines: Vec<String> = raw.trim_end_matches('\n').split('\n').map(|s| s.to_string()).collect();
-        let new_count = new_lines.len();
         self.lines = new_lines;
         self.last_refresh = Some(std::time::Instant::now());
-        // Clamp offset so it never exceeds available history
-        if self.scroll_offset > 0 {
-            let viewport_height: usize = 40; // conservative; real height updated in render
-            self.scroll_offset = self
-                .scroll_offset
-                .min(new_count.saturating_sub(viewport_height));
-        }
-    }
-
-    pub fn page_up(&mut self, viewport_height: usize) {
-        let max_offset = self.lines.len().saturating_sub(viewport_height);
-        self.scroll_offset = (self.scroll_offset + viewport_height).min(max_offset);
-    }
-
-    pub fn page_down(&mut self, viewport_height: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(viewport_height);
     }
 }
 
@@ -405,12 +387,6 @@ impl App {
         match key.code {
             KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state = AppState::Dashboard;
-            }
-            KeyCode::PageUp => {
-                self.agent_view_state.page_up(40);
-            }
-            KeyCode::PageDown => {
-                self.agent_view_state.page_down(40);
             }
             _ => {
                 // Forward key to tmux pane
