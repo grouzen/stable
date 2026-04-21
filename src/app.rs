@@ -138,6 +138,11 @@ impl CreateAgentState {
                     })
                     .collect();
                 matches.sort();
+                if current.is_empty() {
+                    if let Ok(cwd) = std::env::current_dir() {
+                        matches.insert(0, cwd.to_string_lossy().to_string());
+                    }
+                }
                 self.tab_matches = matches;
                 self.tab_idx = 0;
             }
