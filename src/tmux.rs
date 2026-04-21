@@ -91,10 +91,19 @@ pub fn send_keys(target: &str, keys: &str) -> Result<()> {
     Ok(())
 }
 
-/// Capture the raw ANSI output of a pane (`-p -e -S -`).
+/// Capture the raw ANSI output of the pane's current visible viewport (`-p -e`).
+///
+/// We intentionally omit `-S -` (full scrollback) because:
+///   1. We only ever render the last viewport_height lines, so history above the
+///      visible area is never used.
+///   2. Capturing the full scrollback causes the piped string to grow without
+///      bound as the agent produces output, driving CPU usage up linearly.
+///   3. Scrolling is handled by tmux copy-mode (PPage/NPage), which shifts the
+///      visible viewport.  capture-pane captures whatever is currently visible,
+///      so scrolled content is captured correctly without needing -S -.
 pub fn capture_pane(target: &str) -> Result<String> {
     let output = Command::new("tmux")
-        .args(["capture-pane", "-t", target, "-p", "-e", "-S", "-"])
+        .args(["capture-pane", "-t", target, "-p", "-e"])
         .output()
         .with_context(|| format!("failed to capture pane {}", target))?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())

@@ -55,43 +55,46 @@ async fn main() -> Result<()> {
 
     tui::run(|mut terminal| async move {
         loop {
-            // Draw current state
-            let state = app.state.clone();
-            terminal.draw(|f| {
-                let area = f.area();
-                match &state {
-                    app::AppState::Dashboard => {
-                        ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
-                    }
-                    app::AppState::AgentView(idx) => {
-                        if let Some(entry) = app.agents.get(*idx) {
-                            // Content area is full area minus 1 row for the status bar.
-                            // Resize the tmux window to match so capture_pane fills the viewport.
-                            let content_height = area.height.saturating_sub(1);
-                            let _ = tmux::resize_window(&entry.config.pane, area.width, content_height);
-                            ui::agent_view::render_agent_view(
-                                f,
-                                area,
-                                &app.agent_view_state,
-                                entry,
-                            );
+            // Draw only when state has changed since the last frame.
+            if app.dirty {
+                app.dirty = false;
+                let state = app.state.clone();
+                terminal.draw(|f| {
+                    let area = f.area();
+                    match &state {
+                        app::AppState::Dashboard => {
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
+                        }
+                        app::AppState::AgentView(idx) => {
+                            if let Some(entry) = app.agents.get(*idx) {
+                                // Content area is full area minus 1 row for the status bar.
+                                // Resize the tmux window to match so capture_pane fills the viewport.
+                                let content_height = area.height.saturating_sub(1);
+                                let _ = tmux::resize_window(&entry.config.pane, area.width, content_height);
+                                ui::agent_view::render_agent_view(
+                                    f,
+                                    area,
+                                    &app.agent_view_state,
+                                    entry,
+                                );
+                            }
+                        }
+                        app::AppState::CreateAgentDialog => {
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
+                            ui::create_agent::render_create_agent(f, area, &app.create_state);
+                        }
+                        app::AppState::RemoveAgentDialog(idx) => {
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
+                            let name = app
+                                .agents
+                                .get(*idx)
+                                .map(|e| e.config.name.as_str())
+                                .unwrap_or("");
+                            ui::remove_agent::render_remove_agent(f, area, name);
                         }
                     }
-                    app::AppState::CreateAgentDialog => {
-                        ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
-                        ui::create_agent::render_create_agent(f, area, &app.create_state);
-                    }
-                    app::AppState::RemoveAgentDialog(idx) => {
-                        ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
-                        let name = app
-                            .agents
-                            .get(*idx)
-                            .map(|e| e.config.name.as_str())
-                            .unwrap_or("");
-                        ui::remove_agent::render_remove_agent(f, area, name);
-                    }
-                }
-            })?;
+                })?;
+            }
 
             // Wait for next event and dispatch
             let should_continue = if let Some(event) = app.rx.recv().await {

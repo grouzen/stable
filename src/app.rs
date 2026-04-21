@@ -37,6 +37,11 @@ pub enum Event {
 // AgentViewState (owned by App, rendered by ui)
 // ---------------------------------------------------------------------------
 
+/// Maximum number of lines retained in memory for the agent view.
+/// Older lines beyond this cap are discarded; the tmux pane itself retains
+/// the full scrollback so copy-mode scrolling is unaffected.
+const MAX_RETAINED_LINES: usize = 2000;
+
 #[derive(Debug, Default)]
 pub struct AgentViewState {
     pub lines: Vec<String>,
@@ -46,13 +51,32 @@ pub struct AgentViewState {
     pub cursor: Option<(u16, u16)>,
     /// Track previous status to detect edge transitions
     prev_status: Option<AgentStatus>,
+    /// Byte length of the last captured raw string, used to skip no-op ticks.
+    prev_raw_len: usize,
+    /// Last raw capture for byte-exact change detection.
+    prev_raw: String,
 }
 
 impl AgentViewState {
-    pub fn update_lines(&mut self, raw: &str) {
-        let new_lines: Vec<String> = raw.trim_end_matches('\n').split('\n').map(|s| s.to_string()).collect();
-        self.lines = new_lines;
+    /// Returns `true` if the lines were updated (raw content changed),
+    /// `false` if the capture was identical to the previous tick.
+    pub fn update_lines(&mut self, raw: &str) -> bool {
+        // Fast path: length differs → definitely changed.
+        // Slow path: same length → do a full byte comparison to catch same-length
+        // rewrites (e.g. opencode redraws its input field with ANSI in-place).
+        if raw.len() == self.prev_raw_len && raw == self.prev_raw {
+            return false;
+        }
+        self.prev_raw_len = raw.len();
+        self.prev_raw = raw.to_owned();
+
+        let all_lines = raw.trim_end_matches('\n').split('\n');
+        // Keep only the last MAX_RETAINED_LINES to bound allocation cost.
+        let new_lines: Vec<String> = all_lines.map(|s| s.to_string()).collect();
+        let start = new_lines.len().saturating_sub(MAX_RETAINED_LINES);
+        self.lines = new_lines[start..].to_vec();
         self.last_refresh = Some(std::time::Instant::now());
+        true
     }
 }
 
@@ -170,6 +194,9 @@ pub struct App {
     pub create_state: CreateAgentState,
     pub tx: UnboundedSender<Event>,
     pub rx: UnboundedReceiver<Event>,
+    /// Set to `true` whenever state changes and a redraw is needed.
+    /// Cleared to `false` by the render loop after each draw.
+    pub dirty: bool,
 }
 
 impl App {
@@ -185,6 +212,7 @@ impl App {
             create_state: CreateAgentState::default(),
             tx,
             rx,
+            dirty: true, // force initial draw
         }
     }
 
@@ -238,16 +266,23 @@ impl App {
     /// Returns false when the app should quit.
     pub async fn handle_event(&mut self, event: Event) -> bool {
         match event {
-            Event::Key(key) => self.handle_key(key).await,
+            Event::Key(key) => {
+                self.dirty = true;
+                self.handle_key(key).await
+            }
             Event::Mouse(mouse) => {
+                self.dirty = true;
                 self.handle_mouse(mouse);
                 true
             }
             Event::DashboardTick => {
                 self.handle_dashboard_tick().await;
+                self.dirty = true;
                 true
             }
             Event::AgentViewTick => {
+                // handle_agent_view_tick sets self.dirty = true only when
+                // the captured output has actually changed.
                 self.handle_agent_view_tick().await;
                 true
             }
@@ -389,22 +424,31 @@ impl App {
 
         if let Some(entry) = self.agents.get(idx) {
             let pane = entry.config.pane.clone();
-            if let Ok(raw) = tmux::capture_pane(&pane) {
-                self.agent_view_state.update_lines(&raw);
-            }
-            self.agent_view_state.cursor = tmux::cursor_position(&pane);
 
-            // If the pane is no longer alive, immediately mark as Stopped
+            // Check liveness before paying for cursor_position on dead panes.
             if !tmux::is_alive(&pane) {
                 let prev = self.agent_view_state.prev_status.clone();
                 if prev.as_ref() != Some(&AgentStatus::Stopped) {
                     self.agent_view_state.show_stopped_overlay = true;
+                    self.dirty = true;
                 }
                 self.agent_view_state.prev_status = Some(AgentStatus::Stopped.clone());
                 if let Some(e) = self.agents.get_mut(idx) {
                     e.meta.status = AgentStatus::Stopped;
                 }
                 return;
+            }
+
+            if let Ok(raw) = tmux::capture_pane(&pane) {
+                // update_lines returns true only when content changed.
+                if self.agent_view_state.update_lines(&raw) {
+                    self.dirty = true;
+                }
+            }
+            let new_cursor = tmux::cursor_position(&pane);
+            if new_cursor != self.agent_view_state.cursor {
+                self.agent_view_state.cursor = new_cursor;
+                self.dirty = true;
             }
 
             // Update status via adapter
