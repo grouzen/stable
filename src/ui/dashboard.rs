@@ -18,6 +18,7 @@ pub fn render_dashboard(
     agents: &[AgentEntry],
     selected: usize,
     card_scroll: &[u16],
+    card_response_heights: &mut Vec<u16>,
 ) {
     // Split into main area and keybindings bar at bottom
     let chunks = Layout::default()
@@ -29,8 +30,14 @@ pub fn render_dashboard(
     let bar_area = chunks[1];
 
     render_keybindings_bar(f, bar_area);
-
-    render_grid(f, main_area, agents, selected, card_scroll);
+    render_grid(
+        f,
+        main_area,
+        agents,
+        selected,
+        card_scroll,
+        card_response_heights,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +75,7 @@ fn render_grid(
     agents: &[AgentEntry],
     selected: usize,
     card_scroll: &[u16],
+    card_response_heights: &mut Vec<u16>,
 ) {
     if agents.is_empty() {
         let chunks = Layout::default()
@@ -99,6 +107,11 @@ fn render_grid(
         .constraints(row_constraints)
         .split(area);
 
+    // Ensure heights vec has room for all slots
+    if card_response_heights.len() < agents.len() {
+        card_response_heights.resize(agents.len(), 0);
+    }
+
     for row in 0..rows {
         let col_areas = Layout::default()
             .direction(Direction::Horizontal)
@@ -111,7 +124,8 @@ fn render_grid(
 
             if slot < agents.len() {
                 let scroll = card_scroll.get(slot).copied().unwrap_or(0);
-                render_card(f, cell_area, &agents[slot], slot == selected, scroll);
+                let resp_h = render_card(f, cell_area, &agents[slot], slot == selected, scroll);
+                card_response_heights[slot] = resp_h;
             }
             // Empty slots render as blank (no border)
         }
@@ -175,7 +189,7 @@ fn render_card(
     entry: &AgentEntry,
     is_selected: bool,
     response_scroll: u16,
-) {
+) -> u16 {
     let border_style = if is_selected {
         Style::default()
             .fg(Color::Cyan)
@@ -198,7 +212,7 @@ fn render_card(
     f.render_widget(block, area);
 
     if inner.height == 0 || inner.width == 0 {
-        return;
+        return 0;
     }
 
     // -----------------------------------------------------------------------
@@ -297,62 +311,64 @@ fn render_card(
     // Response block
     // -----------------------------------------------------------------------
 
-    if let Some(resp_area) = response_area {
-        // Divider line — draw a thin separator using the block title trick
-        // We use the top border of a borderless block rendered at the top 1 row.
-        let divider_area = Rect {
+    let Some(resp_area) = response_area else {
+        return 0;
+    };
+
+    let divider_area = Rect {
+        x: resp_area.x,
+        y: resp_area.y,
+        width: resp_area.width,
+        height: 1,
+    };
+    let content_area = if resp_area.height > 1 {
+        Rect {
             x: resp_area.x,
-            y: resp_area.y,
+            y: resp_area.y + 1,
             width: resp_area.width,
-            height: 1,
-        };
-        let content_area = if resp_area.height > 1 {
-            Rect {
-                x: resp_area.x,
-                y: resp_area.y + 1,
-                width: resp_area.width,
-                height: resp_area.height - 1,
-            }
-        } else {
-            resp_area
-        };
+            height: resp_area.height - 1,
+        }
+    } else {
+        resp_area
+    };
 
-        // Draw divider
-        let divider_style = if is_selected {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let divider: String = std::iter::repeat('─')
-            .take(resp_area.width as usize)
-            .collect();
-        f.render_widget(Paragraph::new(divider).style(divider_style), divider_area);
+    // Draw divider
+    let divider_style = if is_selected {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let divider: String = std::iter::repeat('─')
+        .take(resp_area.width as usize)
+        .collect();
+    f.render_widget(Paragraph::new(divider).style(divider_style), divider_area);
 
-        // Render response content
-        match &entry.meta.last_model_response {
-            Some(response) if !response.is_empty() => {
-                let md_text = tui_markdown::from_str(response);
-                let scroll_offset = if is_selected { response_scroll } else { 0 };
-                let para = Paragraph::new(md_text)
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .scroll((scroll_offset, 0));
-                f.render_widget(para, content_area);
+    // Render response content
+    match &entry.meta.last_model_response {
+        Some(response) if !response.is_empty() => {
+            let md_text = tui_markdown::from_str(response);
+            let scroll_offset = if is_selected { response_scroll } else { 0 };
+            let para = Paragraph::new(md_text)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .scroll((scroll_offset, 0));
+            f.render_widget(para, content_area);
 
-                // Scroll hint on selected card
-                if is_selected && scroll_offset > 0 {
-                    let hint = Paragraph::new("▲ PgUp")
-                        .style(Style::default().fg(Color::DarkGray))
-                        .alignment(Alignment::Right);
-                    f.render_widget(hint, divider_area);
-                }
-            }
-            _ => {
-                let placeholder =
-                    Paragraph::new("no response yet").style(Style::default().fg(Color::DarkGray));
-                f.render_widget(placeholder, content_area);
+            // Scroll hint on selected card
+            if is_selected && scroll_offset > 0 {
+                let hint = Paragraph::new("▲ PgUp")
+                    .style(Style::default().fg(Color::DarkGray))
+                    .alignment(Alignment::Right);
+                f.render_widget(hint, divider_area);
             }
         }
+        _ => {
+            let placeholder =
+                Paragraph::new("no response yet").style(Style::default().fg(Color::DarkGray));
+            f.render_widget(placeholder, content_area);
+        }
     }
+
+    content_area.height
 }
 
 // ---------------------------------------------------------------------------

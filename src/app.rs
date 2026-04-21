@@ -199,6 +199,9 @@ pub struct App {
     pub dirty: bool,
     /// Per-card scroll offset for the model response block on the dashboard.
     pub card_scroll: Vec<u16>,
+    /// Per-card response viewport height, updated every render frame.
+    /// Used to cap scroll so content doesn't scroll past the last line.
+    pub card_response_heights: Vec<u16>,
 }
 
 impl App {
@@ -217,6 +220,7 @@ impl App {
             rx,
             dirty: true, // force initial draw
             card_scroll: vec![0u16; card_count],
+            card_response_heights: vec![0u16; card_count],
         }
     }
 
@@ -382,7 +386,22 @@ impl App {
             }
             KeyCode::PageDown => {
                 if let Some(s) = self.card_scroll.get_mut(self.selected) {
-                    *s = s.saturating_add(5);
+                    let viewport_h = self
+                        .card_response_heights
+                        .get(self.selected)
+                        .copied()
+                        .unwrap_or(1)
+                        .max(1);
+                    let max_scroll = self
+                        .agents
+                        .get(self.selected)
+                        .and_then(|e| e.meta.last_model_response.as_deref())
+                        .map(|r| {
+                            let lines = tui_markdown::from_str(r).lines.len() as u16;
+                            lines.saturating_sub(viewport_h)
+                        })
+                        .unwrap_or(0);
+                    *s = s.saturating_add(5).min(max_scroll);
                     self.dirty = true;
                 }
             }
@@ -439,6 +458,9 @@ impl App {
         // Ensure card_scroll has an entry for every agent (agents may be added at runtime).
         if self.card_scroll.len() < self.agents.len() {
             self.card_scroll.resize(self.agents.len(), 0);
+        }
+        if self.card_response_heights.len() < self.agents.len() {
+            self.card_response_heights.resize(self.agents.len(), 0);
         }
         if config_dirty {
             let _ = self.config.save();
