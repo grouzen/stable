@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::Value;
 use std::net::TcpListener;
+use std::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use crate::agents::AgentAdapter;
@@ -12,6 +13,9 @@ use crate::tmux;
 pub struct OpenCodeAdapter {
     pub port: u16,
     pub client: Client,
+    /// Last session ID seen via `/session/status` for this instance.
+    /// Used as a fallback when the agent is idle and `/session/status` returns empty.
+    cached_session_id: Mutex<Option<String>>,
 }
 
 impl OpenCodeAdapter {
@@ -19,6 +23,7 @@ impl OpenCodeAdapter {
         Self {
             port,
             client: Client::new(),
+            cached_session_id: Mutex::new(None),
         }
     }
 
@@ -57,86 +62,47 @@ impl OpenCodeAdapter {
             return Err(anyhow!("opencode did not become healthy within timeout"));
         }
 
-        let adapter = OpenCodeAdapter { port, client };
+        let adapter = OpenCodeAdapter { port, client, cached_session_id: Mutex::new(None) };
         Ok((adapter, window_index))
     }
 
     /// Resolves the session ID that opencode is currently using.
     ///
-    /// Strategy:
-    /// 1. Check `/session/status` — if any session is actively tracked there, use the
-    ///    one with the highest `time.updated` among those sessions.
-    /// 2. Fall back to the most recently updated session from `GET /session`.
+    /// Reads from `/session/status`, which is scoped to this opencode instance,
+    /// so it never leaks another agent's session. When the agent is idle and
+    /// `/session/status` returns empty, falls back to the last session ID seen
+    /// for this instance so prompts and context remain visible between turns.
     async fn resolve_session_id(&self) -> Option<String> {
-        // Step 1: check active sessions in /session/status
         let status_url = format!("{}/session/status", self.base_url());
         if let Ok(resp) = self.client.get(&status_url).send().await {
             if let Ok(body) = resp.json::<Value>().await {
                 if let Some(obj) = body.as_object() {
                     if !obj.is_empty() {
-                        // Return the only / most recently active session ID
-                        // (usually just one entry)
-                        let ids: Vec<&str> = obj.keys().map(String::as_str).collect();
-                        if ids.len() == 1 {
-                            return Some(ids[0].to_string());
+                        // Pick the session with the highest `time.updated`.
+                        let id = obj
+                            .keys()
+                            .max_by_key(|id| {
+                                obj[*id]
+                                    .get("time")
+                                    .and_then(|t| t.get("updated"))
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                            })
+                            .map(|id| id.to_string());
+
+                        if let Some(ref sid) = id {
+                            if let Ok(mut cache) = self.cached_session_id.lock() {
+                                *cache = Some(sid.clone());
+                            }
                         }
-                        // Multiple active sessions — pick the most recently updated
-                        if let Some(sid) = self.most_recently_updated_among(ids).await {
-                            return Some(sid);
-                        }
+                        return id;
                     }
                 }
             }
         }
 
-        // Step 2: fall back to most recently updated session overall
-        self.most_recently_updated_session().await
-    }
-
-    /// Among the given session IDs, returns the one with the highest `time.updated`.
-    async fn most_recently_updated_among(&self, ids: Vec<&str>) -> Option<String> {
-        let sessions = self.fetch_all_sessions().await?;
-        sessions
-            .into_iter()
-            .filter(|s| {
-                if let Some(id) = s.get("id").and_then(Value::as_str) {
-                    ids.contains(&id)
-                } else {
-                    false
-                }
-            })
-            .max_by_key(|s| {
-                s.get("time")
-                    .and_then(|t| t.get("updated"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-            })
-            .and_then(|s| s.get("id").and_then(Value::as_str).map(str::to_string))
-    }
-
-    async fn most_recently_updated_session(&self) -> Option<String> {
-        self.fetch_all_sessions()
-            .await?
-            .into_iter()
-            .max_by_key(|s| {
-                s.get("time")
-                    .and_then(|t| t.get("updated"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-            })
-            .and_then(|s| s.get("id").and_then(Value::as_str).map(str::to_string))
-    }
-
-    async fn fetch_all_sessions(&self) -> Option<Vec<Value>> {
-        let url = format!("{}/session", self.base_url());
-        self.client
-            .get(&url)
-            .send()
-            .await
-            .ok()?
-            .json::<Vec<Value>>()
-            .await
-            .ok()
+        // Agent is idle — use the last known session for this instance.
+        self.cached_session_id.lock().ok()?.clone()
     }
 
     async fn fetch_messages(&self) -> Option<Vec<Value>> {
