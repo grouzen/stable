@@ -190,11 +190,13 @@ fn render_card(f: &mut Frame, area: Rect, entry: &AgentEntry, is_selected: bool)
     ]);
 
     let ctx_line = if let Some(ctx) = &entry.meta.context {
-        Line::from(format!(
-            "ctx: {}/{}",
-            format_tokens(ctx.used),
-            format_tokens(ctx.total)
-        ))
+        let used = format_tokens(ctx.used);
+        let text = if let Some(total) = ctx.total {
+            format!("ctx: {}/{}", used, format_tokens(total))
+        } else {
+            format!("ctx: {}", used)
+        };
+        Line::from(text)
     } else {
         Line::from("ctx: —")
     };

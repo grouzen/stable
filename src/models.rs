@@ -11,7 +11,7 @@ pub enum AgentStatus {
 #[derive(Debug, Clone)]
 pub struct ContextInfo {
     pub used: u64,
-    pub total: u64,
+    pub total: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

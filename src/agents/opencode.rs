@@ -156,6 +156,39 @@ fn msg_tokens(msg: &Value) -> Option<&Value> {
     msg.get("info")?.get("tokens")
 }
 
+impl OpenCodeAdapter {
+    async fn resolve_context_total(&self, provider_id: &str, model_id: &str) -> Option<u64> {
+        if provider_id.is_empty() || model_id.is_empty() {
+            return None;
+        }
+
+        let providers_url = format!("{}/provider", self.base_url());
+        let body: Value = self
+            .client
+            .get(&providers_url)
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+
+        // Response is { "all": [ { "id": "...", "models": { "<model_id>": { ... } } } ] }
+        let providers = body.get("all").and_then(Value::as_array)?;
+        let provider = providers
+            .iter()
+            .find(|p: &&Value| p.get("id").and_then(Value::as_str) == Some(provider_id))?;
+
+        // models is a map keyed by model id
+        provider
+            .get("models")
+            .and_then(|m| m.get(model_id))
+            .and_then(|m| m.get("limit"))
+            .and_then(|l| l.get("context"))
+            .and_then(Value::as_u64)
+    }
+}
+
 #[async_trait]
 impl AgentAdapter for OpenCodeAdapter {
     async fn get_status(&self) -> AgentStatus {
@@ -200,70 +233,54 @@ impl AgentAdapter for OpenCodeAdapter {
     async fn get_context(&self) -> Option<ContextInfo> {
         let messages: Vec<Value> = self.fetch_messages().await?;
 
-        // Find latest assistant message by info.time.created
+        // Find the latest assistant message that has non-zero token usage.
+        // In-flight messages exist but have zeroed token counts while streaming.
         let latest_assistant = messages
             .iter()
             .filter(|m: &&Value| msg_role(m) == Some("assistant"))
+            .filter(|m: &&Value| {
+                msg_tokens(m)
+                    .map(|t| {
+                        let input = t.get("input").and_then(Value::as_u64).unwrap_or(0);
+                        let output = t.get("output").and_then(Value::as_u64).unwrap_or(0);
+                        input > 0 || output > 0
+                    })
+                    .unwrap_or(false)
+            })
             .max_by_key(|m: &&Value| msg_time_created(m))?;
 
         let tokens = msg_tokens(latest_assistant)?;
-        let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
-        let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
-        let cache_read = tokens
-            .get("cache")
-            .and_then(|c: &Value| c.get("read"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let cache_write = tokens
-            .get("cache")
-            .and_then(|c: &Value| c.get("write"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let used = input + output + cache_read + cache_write;
+        let used = tokens.get("total").and_then(Value::as_u64).unwrap_or_else(|| {
+            let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
+            let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
+            let cache_read = tokens
+                .get("cache")
+                .and_then(|c: &Value| c.get("read"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cache_write = tokens
+                .get("cache")
+                .and_then(|c: &Value| c.get("write"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            input + output + cache_read + cache_write
+        });
 
-        // Get model from config
-        let config_url = format!("{}/config", self.base_url());
-        let config: Value = self
-            .client
-            .get(&config_url)
-            .send()
-            .await
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+        // modelID and providerID are on the message itself
+        let provider_id = latest_assistant
+            .get("info")
+            .and_then(|i| i.get("providerID"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let model_id = latest_assistant
+            .get("info")
+            .and_then(|i| i.get("modelID"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
 
-        let model_str = config.get("model").and_then(Value::as_str)?;
-        // e.g. "anthropic/claude-sonnet-4-5"
-        let mut parts = model_str.splitn(2, '/');
-        let provider_id = parts.next()?;
-        let model_id = parts.next()?;
-
-        // Get providers
-        let providers_url = format!("{}/provider", self.base_url());
-        let providers: Vec<Value> = self
-            .client
-            .get(&providers_url)
-            .send()
-            .await
-            .ok()?
-            .json()
-            .await
-            .ok()?;
-
-        let provider = providers
-            .iter()
-            .find(|p: &&Value| p.get("id").and_then(Value::as_str) == Some(provider_id))?;
-
-        let models = provider.get("models").and_then(Value::as_array)?;
-        let model = models.iter().find(|m: &&Value| {
-            m.get("id").and_then(Value::as_str) == Some(model_id)
-        })?;
-
-        let total = model
-            .get("limit")
-            .and_then(|l: &Value| l.get("context"))
-            .and_then(Value::as_u64)?;
+        let total = self.resolve_context_total(&provider_id, &model_id).await;
 
         Some(ContextInfo { used, total })
     }
