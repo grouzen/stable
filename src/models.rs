@@ -20,6 +20,7 @@ pub struct AgentMeta {
     pub context: Option<ContextInfo>,
     pub first_prompt: Option<String>,
     pub last_prompt: Option<String>,
+    pub last_model_response: Option<String>,
 }
 
 impl Default for AgentMeta {
@@ -29,6 +30,7 @@ impl Default for AgentMeta {
             context: None,
             first_prompt: None,
             last_prompt: None,
+            last_model_response: None,
         }
     }
 }

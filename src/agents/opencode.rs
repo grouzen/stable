@@ -304,6 +304,15 @@ impl AgentAdapter for OpenCodeAdapter {
             .and_then(|m| first_text_part(&m))
     }
 
+    async fn get_last_model_response(&self) -> Option<String> {
+        let messages: Vec<Value> = self.fetch_messages().await?;
+        messages
+            .into_iter()
+            .filter(|m: &Value| msg_role(m) == Some("assistant"))
+            .last()
+            .and_then(|m| first_text_part(&m))
+    }
+
     fn get_cached_session_id(&self) -> Option<String> {
         self.cached_session_id.lock().ok()?.clone()
     }

@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
                 context: None,
                 first_prompt: None,
                 last_prompt: None,
+                last_model_response: None,
             },
         });
         adapters.push(Box::new(adapter));
@@ -63,7 +64,7 @@ async fn main() -> Result<()> {
                     let area = f.area();
                     match &state {
                         app::AppState::Dashboard => {
-                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll);
                         }
                         app::AppState::AgentView(idx) => {
                             if let Some(entry) = app.agents.get(*idx) {
@@ -80,11 +81,11 @@ async fn main() -> Result<()> {
                             }
                         }
                         app::AppState::CreateAgentDialog => {
-                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll);
                             ui::create_agent::render_create_agent(f, area, &app.create_state);
                         }
                         app::AppState::RemoveAgentDialog(idx) => {
-                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected);
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll);
                             let name = app
                                 .agents
                                 .get(*idx)

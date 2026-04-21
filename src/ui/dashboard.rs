@@ -1,7 +1,7 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
@@ -12,7 +12,13 @@ use crate::models::{AgentEntry, AgentStatus};
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn render_dashboard(f: &mut Frame, area: Rect, agents: &[AgentEntry], selected: usize) {
+pub fn render_dashboard(
+    f: &mut Frame,
+    area: Rect,
+    agents: &[AgentEntry],
+    selected: usize,
+    card_scroll: &[u16],
+) {
     // Split into main area and keybindings bar at bottom
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -24,7 +30,7 @@ pub fn render_dashboard(f: &mut Frame, area: Rect, agents: &[AgentEntry], select
 
     render_keybindings_bar(f, bar_area);
 
-    render_grid(f, main_area, agents, selected);
+    render_grid(f, main_area, agents, selected, card_scroll);
 }
 
 // ---------------------------------------------------------------------------
@@ -56,7 +62,13 @@ pub fn grid_layout(n: usize) -> (usize, usize) {
     }
 }
 
-fn render_grid(f: &mut Frame, area: Rect, agents: &[AgentEntry], selected: usize) {
+fn render_grid(
+    f: &mut Frame,
+    area: Rect,
+    agents: &[AgentEntry],
+    selected: usize,
+    card_scroll: &[u16],
+) {
     if agents.is_empty() {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -68,7 +80,7 @@ fn render_grid(f: &mut Frame, area: Rect, agents: &[AgentEntry], selected: usize
             .split(area);
         let msg = Paragraph::new("No agents. Press [n] to create one.")
             .style(Style::default().fg(Color::DarkGray))
-            .alignment(ratatui::layout::Alignment::Center);
+            .alignment(Alignment::Center);
         f.render_widget(msg, chunks[1]);
         return;
     }
@@ -98,7 +110,8 @@ fn render_grid(f: &mut Frame, area: Rect, agents: &[AgentEntry], selected: usize
             let cell_area = col_areas[col];
 
             if slot < agents.len() {
-                render_card(f, cell_area, &agents[slot], slot == selected);
+                let scroll = card_scroll.get(slot).copied().unwrap_or(0);
+                render_card(f, cell_area, &agents[slot], slot == selected, scroll);
             }
             // Empty slots render as blank (no border)
         }
@@ -156,7 +169,13 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn render_card(f: &mut Frame, area: Rect, entry: &AgentEntry, is_selected: bool) {
+fn render_card(
+    f: &mut Frame,
+    area: Rect,
+    entry: &AgentEntry,
+    is_selected: bool,
+    response_scroll: u16,
+) {
     let border_style = if is_selected {
         Style::default()
             .fg(Color::Cyan)
@@ -178,56 +197,162 @@ fn render_card(f: &mut Frame, area: Rect, entry: &AgentEntry, is_selected: bool)
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Build card body lines
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Layout: top header (3 lines) + response block (remaining)
+    // -----------------------------------------------------------------------
+    //   line 0 — ctx info (left) + status (right)
+    //   line 1 — first prompt
+    //   line 2 — last prompt
+    //   rest   — last model response (markdown, scrollable when selected)
+    // -----------------------------------------------------------------------
+
+    let header_lines: u16 = 3;
+    let (header_area, response_area) = if inner.height > header_lines {
+        let splits = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(header_lines), Constraint::Min(0)])
+            .split(inner);
+        (splits[0], Some(splits[1]))
+    } else {
+        (inner, None)
+    };
+
+    // -----------------------------------------------------------------------
+    // Header — 3 rows
+    // -----------------------------------------------------------------------
+
+    // Row 0: ctx (left) + status (right)
     let sym = status_symbol(&entry.meta.status);
     let lbl = status_label(&entry.meta.status);
     let col = status_color(&entry.meta.status);
 
-    let status_line = Line::from(vec![
-        Span::styled(sym, Style::default().fg(col)),
-        Span::raw(" "),
-        Span::styled(lbl, Style::default().fg(col)),
-    ]);
-
-    let ctx_line = if let Some(ctx) = &entry.meta.context {
+    let ctx_text = if let Some(ctx) = &entry.meta.context {
         let used = format_tokens(ctx.used);
-        let text = if let Some(total) = ctx.total {
+        if let Some(total) = ctx.total {
             format!("ctx: {}/{}", used, format_tokens(total))
         } else {
             format!("ctx: {}", used)
-        };
-        Line::from(text)
+        }
     } else {
-        Line::from("ctx: —")
+        "ctx: —".to_string()
     };
 
-    let avail_width = inner.width as usize;
-    let label_width = 8; // "first: " or "last: "
-    let text_width = avail_width.saturating_sub(label_width);
-
-    let first_line = if let Some(fp) = &entry.meta.first_prompt {
-        Line::from(format!("first: \"{}\"", truncate(fp, text_width)))
-    } else {
-        Line::from("first: —")
-    };
-
-    let last_line = if let Some(lp) = &entry.meta.last_prompt {
-        Line::from(format!("last:  \"{}\"", truncate(lp, text_width)))
-    } else {
-        Line::from("last:  —")
-    };
-
-    let pane_line = Line::from(format!("pane: {}", entry.config.pane));
-
-    let text = Text::from(vec![
-        status_line,
-        ctx_line,
-        first_line,
-        last_line,
-        pane_line,
+    let status_str = format!("{} {}", sym, lbl);
+    let avail = inner.width as usize;
+    // Pad ctx_text so status is right-aligned on the same line
+    let padding = avail.saturating_sub(ctx_text.len() + status_str.len());
+    let row0_text = format!("{}{}{}", ctx_text, " ".repeat(padding), status_str);
+    let row0 = Line::from(vec![
+        Span::raw(&row0_text[..ctx_text.len() + padding]),
+        Span::styled(status_str.clone(), Style::default().fg(col)),
     ]);
-    let para = Paragraph::new(text);
-    f.render_widget(para, inner);
+
+    // Row 1: first prompt
+    let label_w = 8usize; // "first: " width
+    let text_w = avail.saturating_sub(label_w + 2); // +2 for quotes
+    let row1 = if let Some(fp) = &entry.meta.first_prompt {
+        Line::from(vec![
+            Span::styled("first: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("\"{}\"", truncate(fp, text_w))),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("first: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("—", Style::default().fg(Color::DarkGray)),
+        ])
+    };
+
+    // Row 2: last prompt
+    let row2 = if let Some(lp) = &entry.meta.last_prompt {
+        Line::from(vec![
+            Span::styled("last:  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("\"{}\"", truncate(lp, text_w))),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("last:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("—", Style::default().fg(Color::DarkGray)),
+        ])
+    };
+
+    // Render the three header rows
+    let header_splits = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(header_area);
+
+    f.render_widget(Paragraph::new(row0), header_splits[0]);
+    f.render_widget(Paragraph::new(row1), header_splits[1]);
+    f.render_widget(Paragraph::new(row2), header_splits[2]);
+
+    // -----------------------------------------------------------------------
+    // Response block
+    // -----------------------------------------------------------------------
+
+    if let Some(resp_area) = response_area {
+        // Divider line — draw a thin separator using the block title trick
+        // We use the top border of a borderless block rendered at the top 1 row.
+        let divider_area = Rect {
+            x: resp_area.x,
+            y: resp_area.y,
+            width: resp_area.width,
+            height: 1,
+        };
+        let content_area = if resp_area.height > 1 {
+            Rect {
+                x: resp_area.x,
+                y: resp_area.y + 1,
+                width: resp_area.width,
+                height: resp_area.height - 1,
+            }
+        } else {
+            resp_area
+        };
+
+        // Draw divider
+        let divider_style = if is_selected {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let divider: String = std::iter::repeat('─')
+            .take(resp_area.width as usize)
+            .collect();
+        f.render_widget(Paragraph::new(divider).style(divider_style), divider_area);
+
+        // Render response content
+        match &entry.meta.last_model_response {
+            Some(response) if !response.is_empty() => {
+                let md_text = tui_markdown::from_str(response);
+                let scroll_offset = if is_selected { response_scroll } else { 0 };
+                let para = Paragraph::new(md_text)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .scroll((scroll_offset, 0));
+                f.render_widget(para, content_area);
+
+                // Scroll hint on selected card
+                if is_selected && scroll_offset > 0 {
+                    let hint = Paragraph::new("▲ PgUp")
+                        .style(Style::default().fg(Color::DarkGray))
+                        .alignment(Alignment::Right);
+                    f.render_widget(hint, divider_area);
+                }
+            }
+            _ => {
+                let placeholder =
+                    Paragraph::new("no response yet").style(Style::default().fg(Color::DarkGray));
+                f.render_widget(placeholder, content_area);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +360,9 @@ fn render_card(f: &mut Frame, area: Rect, entry: &AgentEntry, is_selected: bool)
 // ---------------------------------------------------------------------------
 
 fn render_keybindings_bar(f: &mut Frame, area: Rect) {
-    let bar = Paragraph::new("[n] New  [d] Delete  [Enter] Open  [←↓↑→/hjkl] Navigate  [q] Quit")
-        .style(Style::default().fg(Color::DarkGray));
+    let bar = Paragraph::new(
+        "[n] New  [d] Delete  [Enter] Open  [←↓↑→/hjkl] Navigate  [PgUp/PgDn] Scroll response  [q] Quit",
+    )
+    .style(Style::default().fg(Color::DarkGray));
     f.render_widget(bar, area);
 }

@@ -197,11 +197,14 @@ pub struct App {
     /// Set to `true` whenever state changes and a redraw is needed.
     /// Cleared to `false` by the render loop after each draw.
     pub dirty: bool,
+    /// Per-card scroll offset for the model response block on the dashboard.
+    pub card_scroll: Vec<u16>,
 }
 
 impl App {
     pub fn new(config: Config, agents: Vec<AgentEntry>, adapters: Vec<Box<dyn AgentAdapter>>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let card_count = agents.len();
         Self {
             agents,
             adapters,
@@ -213,6 +216,7 @@ impl App {
             tx,
             rx,
             dirty: true, // force initial draw
+            card_scroll: vec![0u16; card_count],
         }
     }
 
@@ -345,6 +349,7 @@ impl App {
                     let (cols, _) = grid_layout(self.agents.len());
                     if self.selected % cols > 0 {
                         self.selected -= 1;
+                        self.reset_card_scroll();
                     }
                 }
             }
@@ -353,6 +358,7 @@ impl App {
                     let (cols, _) = grid_layout(self.agents.len());
                     if self.selected % cols < cols - 1 && self.selected + 1 < self.agents.len() {
                         self.selected += 1;
+                        self.reset_card_scroll();
                     }
                 }
             }
@@ -361,6 +367,7 @@ impl App {
                     let (cols, _) = grid_layout(self.agents.len());
                     if self.selected >= cols {
                         self.selected -= cols;
+                        self.reset_card_scroll();
                     }
                 }
             }
@@ -369,12 +376,32 @@ impl App {
                     let (cols, _) = grid_layout(self.agents.len());
                     if self.selected + cols < self.agents.len() {
                         self.selected += cols;
+                        self.reset_card_scroll();
                     }
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(s) = self.card_scroll.get_mut(self.selected) {
+                    *s = s.saturating_add(5);
+                    self.dirty = true;
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(s) = self.card_scroll.get_mut(self.selected) {
+                    *s = s.saturating_sub(5);
+                    self.dirty = true;
                 }
             }
             _ => {}
         }
         true
+    }
+
+    fn reset_card_scroll(&mut self) {
+        if let Some(s) = self.card_scroll.get_mut(self.selected) {
+            *s = 0;
+        }
+        self.dirty = true;
     }
 
     // -----------------------------------------------------------------------
@@ -389,6 +416,7 @@ impl App {
             let context = self.adapters[i].get_context().await;
             let first_prompt = self.adapters[i].get_first_prompt().await;
             let last_prompt = self.adapters[i].get_last_prompt().await;
+            let last_model_response = self.adapters[i].get_last_model_response().await;
 
             // Persist newly discovered session IDs so the dashboard shows
             // correct history immediately on the next startup.
@@ -405,7 +433,12 @@ impl App {
                 entry.meta.context = context;
                 entry.meta.first_prompt = first_prompt;
                 entry.meta.last_prompt = last_prompt;
+                entry.meta.last_model_response = last_model_response;
             }
+        }
+        // Ensure card_scroll has an entry for every agent (agents may be added at runtime).
+        if self.card_scroll.len() < self.agents.len() {
+            self.card_scroll.resize(self.agents.len(), 0);
         }
         if config_dirty {
             let _ = self.config.save();
