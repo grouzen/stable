@@ -343,17 +343,32 @@ impl App {
 
     async fn handle_dashboard_tick(&mut self) {
         let len = self.adapters.len();
+        let mut config_dirty = false;
         for i in 0..len {
             let status = self.adapters[i].get_status().await;
             let context = self.adapters[i].get_context().await;
             let first_prompt = self.adapters[i].get_first_prompt().await;
             let last_prompt = self.adapters[i].get_last_prompt().await;
+
+            // Persist newly discovered session IDs so the dashboard shows
+            // correct history immediately on the next startup.
+            let session_id = self.adapters[i].get_cached_session_id();
+            if let Some(agent_config) = self.config.agents.get_mut(i) {
+                if session_id.is_some() && session_id != agent_config.session_id {
+                    agent_config.session_id = session_id;
+                    config_dirty = true;
+                }
+            }
+
             if let Some(entry) = self.agents.get_mut(i) {
                 entry.meta.status = status;
                 entry.meta.context = context;
                 entry.meta.first_prompt = first_prompt;
                 entry.meta.last_prompt = last_prompt;
             }
+        }
+        if config_dirty {
+            let _ = self.config.save();
         }
     }
 
@@ -476,6 +491,7 @@ impl App {
                                 agent_type: "opencode".to_string(),
                                 directory: dir,
                                 port: adapter.port,
+                                session_id: None,
                             };
                             self.config.agents.push(config.clone());
                             let _ = self.config.save();

@@ -9,6 +9,10 @@ pub struct AgentConfig {
     pub agent_type: String,
     pub directory: String,
     pub port: u16,
+    /// Last known session ID for this agent, persisted so the dashboard can
+    /// show history immediately on startup without a global session lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

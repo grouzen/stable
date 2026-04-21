@@ -19,11 +19,11 @@ pub struct OpenCodeAdapter {
 }
 
 impl OpenCodeAdapter {
-    pub fn new(port: u16) -> Self {
+    pub fn new(port: u16, session_id: Option<String>) -> Self {
         Self {
             port,
             client: Client::new(),
-            cached_session_id: Mutex::new(None),
+            cached_session_id: Mutex::new(session_id),
         }
     }
 
@@ -68,10 +68,12 @@ impl OpenCodeAdapter {
 
     /// Resolves the session ID that opencode is currently using.
     ///
-    /// Reads from `/session/status`, which is scoped to this opencode instance,
-    /// so it never leaks another agent's session. When the agent is idle and
-    /// `/session/status` returns empty, falls back to the last session ID seen
-    /// for this instance so prompts and context remain visible between turns.
+    /// 1. `/session/status` — port-scoped, used when the agent is active. Result is
+    ///    cached so it persists while the agent is idle between turns.
+    /// 2. Cache — populated from persisted config on startup, then kept up to date
+    ///    from step 1. Ensures history is visible immediately after launch and
+    ///    between turns, with no global session lookup that could leak another
+    ///    agent's data.
     async fn resolve_session_id(&self) -> Option<String> {
         let status_url = format!("{}/session/status", self.base_url());
         if let Ok(resp) = self.client.get(&status_url).send().await {
@@ -101,7 +103,7 @@ impl OpenCodeAdapter {
             }
         }
 
-        // Agent is idle — use the last known session for this instance.
+        // Agent is idle or not yet active — use the persisted/cached session.
         self.cached_session_id.lock().ok()?.clone()
     }
 
@@ -300,5 +302,9 @@ impl AgentAdapter for OpenCodeAdapter {
             .filter(|m: &Value| msg_role(m) == Some("user"))
             .last()
             .and_then(|m| first_text_part(&m))
+    }
+
+    fn get_cached_session_id(&self) -> Option<String> {
+        self.cached_session_id.lock().ok()?.clone()
     }
 }

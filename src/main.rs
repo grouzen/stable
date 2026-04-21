@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     let mut adapters: Vec<Box<dyn AgentAdapter>> = Vec::new();
 
     for agent_config in &config.agents {
-        let adapter = OpenCodeAdapter::new(agent_config.port);
+        let adapter = OpenCodeAdapter::new(agent_config.port, agent_config.session_id.clone());
         agents.push(AgentEntry {
             config: agent_config.clone(),
             meta: AgentMeta {
