@@ -88,8 +88,11 @@ pub fn render_agent_view(
     };
 
     let status_text = format!(
-        "name: {} | {} | last refresh {}",
-        agent_entry.config.name, agent_entry.config.agent_type, refresh_str
+        " {} | {} | {} | last refresh {}",
+        agent_entry.config.name,
+        agent_entry.config.directory,
+        agent_entry.config.agent_type,
+        refresh_str
     );
 
     let status_bar = Paragraph::new(status_text).style(Style::default().fg(Color::DarkGray));
