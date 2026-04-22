@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
                                     area,
                                     &app.agent_view_state,
                                     entry,
+                                    &app.agents,
                                 );
                             }
                         }

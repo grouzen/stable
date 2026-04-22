@@ -8,13 +8,14 @@ use ratatui::{
 };
 
 use crate::app::AgentViewState;
-use crate::models::AgentEntry;
+use crate::models::{AgentEntry, AgentStatus};
 
 pub fn render_agent_view(
     f: &mut Frame,
     area: Rect,
     state: &AgentViewState,
     agent_entry: &AgentEntry,
+    agents: &[AgentEntry],
 ) {
     // Split into content area and status bar (last row)
     let chunks = Layout::default()
@@ -95,6 +96,27 @@ pub fn render_agent_view(
         refresh_str
     );
 
+    let running = agents
+        .iter()
+        .filter(|a| matches!(a.meta.status, AgentStatus::Running))
+        .count();
+    let waiting = agents
+        .iter()
+        .filter(|a| matches!(a.meta.status, AgentStatus::WaitingForInput))
+        .count();
+
+    let status_line = Line::from(vec![
+        Span::styled(status_text, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("  ● {} running", running),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(
+            format!("  ⏸ {} waiting", waiting),
+            Style::default().fg(Color::Yellow),
+        ),
+    ]);
+
     let hint = " Shift+drag to select";
     let hint_width = hint.len() as u16;
     let status_chunks = Layout::default()
@@ -102,7 +124,7 @@ pub fn render_agent_view(
         .constraints([Constraint::Min(0), Constraint::Length(hint_width)])
         .split(status_area);
 
-    let status_bar = Paragraph::new(status_text).style(Style::default().fg(Color::DarkGray));
+    let status_bar = Paragraph::new(status_line);
     f.render_widget(status_bar, status_chunks[0]);
 
     let hint_bar = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
