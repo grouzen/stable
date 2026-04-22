@@ -45,10 +45,11 @@ impl LiveCache {
 
 // ---------------------------------------------------------------------------
 // How many recent messages the SSE task fetches on each message event.
-// The dashboard only needs the last user message, last assistant message,
-// and the last assistant token counts — 5 is a comfortable margin.
+// Agentic responses can span many assistant messages (one per tool-calling
+// step).  We need the window to comfortably hold a full response turn plus
+// the preceding user message.  50 is a safe upper bound.
 // ---------------------------------------------------------------------------
-const RECENT_LIMIT: usize = 5;
+const RECENT_LIMIT: usize = 50;
 
 // Minimum gap between successive tail-fetches triggered by streaming part
 // events.  Part deltas fire many times per second; without this guard each
@@ -628,12 +629,41 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     async fn get_last_model_response(&self) -> Option<String> {
-        let messages = self.live_cache.read().unwrap().recent_messages.clone()?;
-        messages
-            .into_iter()
-            .filter(|m: &Value| msg_role(m) == Some("assistant"))
-            .last()
-            .and_then(|m| all_text_parts(&m))
+        let mut messages = self.live_cache.read().unwrap().recent_messages.clone()?;
+        // Sort oldest-first by creation timestamp so positional ordering is reliable.
+        messages.sort_by_key(|m| msg_time_created(m));
+
+        // Collect the start index of each response turn (the index just after
+        // each user message).
+        let turn_starts: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| msg_role(m) == Some("user"))
+            .map(|(i, _)| i + 1)
+            .collect();
+
+        // Walk turns newest-to-oldest; return the first one that contains text.
+        // If the agent is mid-run and the latest turn has no text yet, this
+        // naturally falls back to the previous completed response.
+        for &start in turn_starts.iter().rev() {
+            let parts: Vec<String> = messages[start..]
+                .iter()
+                .filter(|m| msg_role(m) == Some("assistant"))
+                .filter_map(|m| all_text_parts(m))
+                .collect();
+            if !parts.is_empty() {
+                return Some(parts.join("\n"));
+            }
+        }
+
+        // Fallback: assistant text before the first user message.
+        let first_turn_start = turn_starts.first().copied().unwrap_or(0);
+        let parts: Vec<String> = messages[..first_turn_start]
+            .iter()
+            .filter(|m| msg_role(m) == Some("assistant"))
+            .filter_map(|m| all_text_parts(m))
+            .collect();
+        if !parts.is_empty() { Some(parts.join("\n")) } else { None }
     }
 
     fn get_cached_session_id(&self) -> Option<String> {

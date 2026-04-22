@@ -202,6 +202,10 @@ pub struct App {
     /// Per-card response viewport height, updated every render frame.
     /// Used to cap scroll so content doesn't scroll past the last line.
     pub card_response_heights: Vec<u16>,
+    /// Per-card response content area width, updated every render frame.
+    /// Used together with Paragraph::line_count to compute the true
+    /// wrapped line count for accurate max-scroll calculation.
+    pub card_response_widths: Vec<u16>,
 }
 
 impl App {
@@ -221,6 +225,7 @@ impl App {
             dirty: true, // force initial draw
             card_scroll: vec![0u16; card_count],
             card_response_heights: vec![0u16; card_count],
+            card_response_widths: vec![0u16; card_count],
         }
     }
 
@@ -392,13 +397,20 @@ impl App {
                         .copied()
                         .unwrap_or(1)
                         .max(1);
+                    let content_w = self
+                        .card_response_widths
+                        .get(self.selected)
+                        .copied()
+                        .unwrap_or(80)
+                        .max(1);
                     let max_scroll = self
                         .agents
                         .get(self.selected)
                         .and_then(|e| e.meta.last_model_response.as_deref())
                         .map(|r| {
-                            let lines = tui_markdown::from_str(r).lines.len() as u16;
-                            lines.saturating_sub(viewport_h)
+                            let text = tui_markdown::from_str(r);
+                            let total = wrapped_line_count(&text, content_w);
+                            total.saturating_sub(viewport_h)
                         })
                         .unwrap_or(0);
                     *s = s.saturating_add(5).min(max_scroll);
@@ -461,6 +473,9 @@ impl App {
         }
         if self.card_response_heights.len() < self.agents.len() {
             self.card_response_heights.resize(self.agents.len(), 0);
+        }
+        if self.card_response_widths.len() < self.agents.len() {
+            self.card_response_widths.resize(self.agents.len(), 0);
         }
         if config_dirty {
             let _ = self.config.save();
@@ -686,6 +701,41 @@ impl App {
 // ---------------------------------------------------------------------------
 // Key → tmux string conversion
 // ---------------------------------------------------------------------------
+
+/// Count the number of visual (wrapped) lines a `Text` will occupy in a
+/// widget of the given `width`.  This is a lightweight approximation: it
+/// sums the display-column widths of each `Line`'s spans and divides by
+/// `width`, rounding up.  Empty logical lines count as one visual line.
+fn wrapped_line_count(text: &ratatui::text::Text, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let mut count: u16 = 0;
+    for line in text.iter() {
+        let line_width: usize = line
+            .spans
+            .iter()
+            .map(|s| unicode_display_width(s.content.as_ref()))
+            .sum();
+        let rows = if line_width == 0 {
+            1
+        } else {
+            ((line_width as u16).saturating_sub(1) / width) + 1
+        };
+        count = count.saturating_add(rows);
+    }
+    count
+}
+
+/// Approximate display-column width of a string (ASCII fast path; falls back
+/// to character count for non-ASCII so we don't need a heavy Unicode library).
+fn unicode_display_width(s: &str) -> usize {
+    if s.is_ascii() {
+        s.len()
+    } else {
+        s.chars().count()
+    }
+}
 
 fn key_event_to_tmux(key: &KeyEvent) -> String {
     // Ctrl combos

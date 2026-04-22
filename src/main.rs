@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
                     let area = f.area();
                     match &state {
                         app::AppState::Dashboard => {
-                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll, &mut app.card_response_heights);
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll, &mut app.card_response_heights, &mut app.card_response_widths);
                         }
                         app::AppState::AgentView(idx) => {
                             if let Some(entry) = app.agents.get(*idx) {
@@ -81,11 +81,11 @@ async fn main() -> Result<()> {
                             }
                         }
                         app::AppState::CreateAgentDialog => {
-                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll, &mut app.card_response_heights);
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll, &mut app.card_response_heights, &mut app.card_response_widths);
                             ui::create_agent::render_create_agent(f, area, &app.create_state);
                         }
                         app::AppState::RemoveAgentDialog(idx) => {
-                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll, &mut app.card_response_heights);
+                            ui::dashboard::render_dashboard(f, area, &app.agents, app.selected, &app.card_scroll, &mut app.card_response_heights, &mut app.card_response_widths);
                             let name = app
                                 .agents
                                 .get(*idx)

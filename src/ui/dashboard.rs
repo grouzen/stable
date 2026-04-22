@@ -19,6 +19,7 @@ pub fn render_dashboard(
     selected: usize,
     card_scroll: &[u16],
     card_response_heights: &mut Vec<u16>,
+    card_response_widths: &mut Vec<u16>,
 ) {
     // Split into main area and keybindings bar at bottom
     let chunks = Layout::default()
@@ -37,6 +38,7 @@ pub fn render_dashboard(
         selected,
         card_scroll,
         card_response_heights,
+        card_response_widths,
     );
 }
 
@@ -76,6 +78,7 @@ fn render_grid(
     selected: usize,
     card_scroll: &[u16],
     card_response_heights: &mut Vec<u16>,
+    card_response_widths: &mut Vec<u16>,
 ) {
     if agents.is_empty() {
         let chunks = Layout::default()
@@ -107,9 +110,12 @@ fn render_grid(
         .constraints(row_constraints)
         .split(area);
 
-    // Ensure heights vec has room for all slots
+    // Ensure vecs have room for all slots
     if card_response_heights.len() < agents.len() {
         card_response_heights.resize(agents.len(), 0);
+    }
+    if card_response_widths.len() < agents.len() {
+        card_response_widths.resize(agents.len(), 0);
     }
 
     for row in 0..rows {
@@ -124,8 +130,10 @@ fn render_grid(
 
             if slot < agents.len() {
                 let scroll = card_scroll.get(slot).copied().unwrap_or(0);
-                let resp_h = render_card(f, cell_area, &agents[slot], slot == selected, scroll);
+                let (resp_h, resp_w) =
+                    render_card(f, cell_area, &agents[slot], slot == selected, scroll);
                 card_response_heights[slot] = resp_h;
+                card_response_widths[slot] = resp_w;
             }
             // Empty slots render as blank (no border)
         }
@@ -189,7 +197,7 @@ fn render_card(
     entry: &AgentEntry,
     is_selected: bool,
     response_scroll: u16,
-) -> u16 {
+) -> (u16, u16) {
     let border_style = if is_selected {
         Style::default()
             .fg(Color::Cyan)
@@ -212,7 +220,7 @@ fn render_card(
     f.render_widget(block, area);
 
     if inner.height == 0 || inner.width == 0 {
-        return 0;
+        return (0, 0);
     }
 
     // -----------------------------------------------------------------------
@@ -312,7 +320,7 @@ fn render_card(
     // -----------------------------------------------------------------------
 
     let Some(resp_area) = response_area else {
-        return 0;
+        return (0, 0);
     };
 
     let divider_area = Rect {
@@ -368,7 +376,7 @@ fn render_card(
         }
     }
 
-    content_area.height
+    (content_area.height, content_area.width)
 }
 
 // ---------------------------------------------------------------------------
