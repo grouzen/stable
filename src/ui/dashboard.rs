@@ -181,14 +181,20 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
+/// Truncates a string to `max` chars, appending `…` if needed.
 fn truncate(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max {
         s.to_string()
     } else {
-        let truncated: String = chars[..max.saturating_sub(1)].iter().collect();
-        format!("{}…", truncated)
+        let t: String = chars[..max.saturating_sub(1)].iter().collect();
+        format!("{}…", t)
     }
+}
+
+/// Returns the first newline-delimited line of a prompt string.
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("")
 }
 
 fn render_card(
@@ -216,23 +222,67 @@ fn render_card(
         })
         .border_style(border_style);
 
-    let inner = block.inner(area);
+    // Apply 1-cell left/right inner padding
+    let raw_inner = block.inner(area);
     f.render_widget(block, area);
 
-    if inner.height == 0 || inner.width == 0 {
+    if raw_inner.height == 0 || raw_inner.width < 2 {
         return (0, 0);
     }
+    let inner = Rect {
+        x: raw_inner.x + 1,
+        y: raw_inner.y,
+        width: raw_inner.width.saturating_sub(2),
+        height: raw_inner.height,
+    };
 
     // -----------------------------------------------------------------------
-    // Layout: top header (3 lines) + response block (remaining)
-    // -----------------------------------------------------------------------
-    //   line 0 — ctx info (left) + status (right)
-    //   line 1 — first prompt
-    //   line 2 — last prompt
-    //   rest   — last model response (markdown, scrollable when selected)
+    // Compute header content
     // -----------------------------------------------------------------------
 
-    let header_lines: u16 = 3;
+    // Row 0: ctx (left) + status (right) — always height 3
+    let sym = status_symbol(&entry.meta.status);
+    let lbl = status_label(&entry.meta.status);
+    let col = status_color(&entry.meta.status);
+
+    let ctx_text = if let Some(ctx) = &entry.meta.context {
+        let used = format_tokens(ctx.used);
+        if let Some(total) = ctx.total {
+            format!("{}/{}", used, format_tokens(total))
+        } else {
+            used
+        }
+    } else {
+        "—".to_string()
+    };
+
+    let status_str = format!("{} {}", sym, lbl);
+    let avail = inner.width as usize;
+    let padding = avail.saturating_sub(ctx_text.len() + status_str.len());
+    let row0 = Line::from(vec![
+        Span::raw(format!("{}{}", ctx_text, " ".repeat(padding))),
+        Span::styled(status_str, Style::default().fg(col)),
+    ]);
+
+    // Rows 1 & 2: prompts — single line, truncated, ">" prefix
+    let fp_raw = entry.meta.first_prompt.as_deref().unwrap_or("");
+    let lp_raw = entry.meta.last_prompt.as_deref().unwrap_or("");
+    let fp_text = first_line(fp_raw);
+    let lp_text = first_line(lp_raw);
+
+    // Hide last prompt if it equals the first (e.g. single-message agents)
+    let show_last = !lp_text.is_empty() && lp_text != fp_text;
+
+    let prompt_h: u16 = 2; // 1 text + 1 bottom margin
+    let row1_h = prompt_h;
+    let row2_h = if show_last { prompt_h } else { 0 };
+    let row0_h: u16 = 2;
+    let header_lines = row0_h + row1_h + row2_h;
+
+    // -----------------------------------------------------------------------
+    // Layout: header + response block
+    // -----------------------------------------------------------------------
+
     let (header_area, response_area) = if inner.height > header_lines {
         let splits = Layout::default()
             .direction(Direction::Vertical)
@@ -244,76 +294,76 @@ fn render_card(
     };
 
     // -----------------------------------------------------------------------
-    // Header — 3 rows
+    // Render header rows
     // -----------------------------------------------------------------------
 
-    // Row 0: ctx (left) + status (right)
-    let sym = status_symbol(&entry.meta.status);
-    let lbl = status_label(&entry.meta.status);
-    let col = status_color(&entry.meta.status);
-
-    let ctx_text = if let Some(ctx) = &entry.meta.context {
-        let used = format_tokens(ctx.used);
-        if let Some(total) = ctx.total {
-            format!("ctx: {}/{}", used, format_tokens(total))
-        } else {
-            format!("ctx: {}", used)
+    // Helper: render a line with bottom padding inside a slot
+    let render_centered = |f: &mut Frame, slot: Rect, line: Line, h: u16| {
+        if slot.height == 0 || h == 0 {
+            return;
         }
-    } else {
-        "ctx: —".to_string()
+        let sub = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(h.saturating_sub(1).max(1)),
+                Constraint::Length(1),
+            ])
+            .split(slot);
+        f.render_widget(Paragraph::new(line), sub[0]);
     };
 
-    let status_str = format!("{} {}", sym, lbl);
-    let avail = inner.width as usize;
-    // Pad ctx_text so status is right-aligned on the same line
-    let padding = avail.saturating_sub(ctx_text.len() + status_str.len());
-    let row0_text = format!("{}{}{}", ctx_text, " ".repeat(padding), status_str);
-    let row0 = Line::from(vec![
-        Span::raw(&row0_text[..ctx_text.len() + padding]),
-        Span::styled(status_str.clone(), Style::default().fg(col)),
-    ]);
+    // Helper: render a single-line truncated prompt with a thick colored left
+    // border, dimmed background, and a bottom margin line.
+    let render_prompt = |f: &mut Frame, slot: Rect, text: &str, h: u16| {
+        if slot.height == 0 || h == 0 {
+            return;
+        }
+        // Split slot into text row + bottom margin
+        let sub = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(h.saturating_sub(1)),
+            ])
+            .split(slot);
+        let text_area = sub[0];
 
-    // Row 1: first prompt
-    let label_w = 8usize; // "first: " width
-    let text_w = avail.saturating_sub(label_w + 2); // +2 for quotes
-    let row1 = if let Some(fp) = &entry.meta.first_prompt {
-        Line::from(vec![
-            Span::styled("first: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(format!("\"{}\"", truncate(fp, text_w))),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("first: ", Style::default().fg(Color::DarkGray)),
-            Span::styled("—", Style::default().fg(Color::DarkGray)),
-        ])
+        // Block: thick left border (Cyan) + dim background fill
+        let prompt_block = Block::default()
+            .borders(Borders::LEFT)
+            .border_type(BorderType::Thick)
+            .border_style(Style::default().fg(Color::Cyan))
+            .style(Style::default().bg(Color::Rgb(20, 24, 30)));
+        let text_inner = prompt_block.inner(text_area);
+        f.render_widget(prompt_block, text_area);
+
+        // Truncate to inner width (left border consumed 1 char)
+        let usable = text_inner.width as usize;
+        let content = if text.is_empty() {
+            Paragraph::new(Span::styled("—", Style::default().fg(Color::DarkGray)))
+                .style(Style::default().bg(Color::Rgb(20, 24, 30)))
+        } else {
+            Paragraph::new(Span::raw(truncate(text, usable)))
+                .style(Style::default().bg(Color::Rgb(20, 24, 30)))
+        };
+        f.render_widget(content, text_inner);
     };
 
-    // Row 2: last prompt
-    let row2 = if let Some(lp) = &entry.meta.last_prompt {
-        Line::from(vec![
-            Span::styled("last:  ", Style::default().fg(Color::DarkGray)),
-            Span::raw(format!("\"{}\"", truncate(lp, text_w))),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("last:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("—", Style::default().fg(Color::DarkGray)),
-        ])
-    };
-
-    // Render the three header rows
+    // Build header row areas
+    let mut constraints = vec![Constraint::Length(row0_h), Constraint::Length(row1_h)];
+    if show_last {
+        constraints.push(Constraint::Length(row2_h));
+    }
     let header_splits = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints(constraints)
         .split(header_area);
 
-    f.render_widget(Paragraph::new(row0), header_splits[0]);
-    f.render_widget(Paragraph::new(row1), header_splits[1]);
-    f.render_widget(Paragraph::new(row2), header_splits[2]);
+    render_centered(f, header_splits[0], row0, row0_h);
+    render_prompt(f, header_splits[1], fp_text, row1_h);
+    if show_last {
+        render_prompt(f, header_splits[2], lp_text, row2_h);
+    }
 
     // -----------------------------------------------------------------------
     // Response block
