@@ -95,8 +95,18 @@ pub fn render_agent_view(
         refresh_str
     );
 
+    let hint = " Shift+drag to select";
+    let hint_width = hint.len() as u16;
+    let status_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(hint_width)])
+        .split(status_area);
+
     let status_bar = Paragraph::new(status_text).style(Style::default().fg(Color::DarkGray));
-    f.render_widget(status_bar, status_area);
+    f.render_widget(status_bar, status_chunks[0]);
+
+    let hint_bar = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
+    f.render_widget(hint_bar, status_chunks[1]);
 
     // Stopped overlay
     if state.show_stopped_overlay {
