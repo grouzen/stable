@@ -1,9 +1,11 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::net::TcpListener;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -11,39 +13,82 @@ use crate::agents::AgentAdapter;
 use crate::models::{AgentStatus, ContextInfo};
 use crate::tmux;
 
-/// How long a `TickCache` entry is considered fresh.
-/// All `get_*` calls within a single 500 ms dashboard tick fire within a few
-/// milliseconds of each other, so 400 ms is safely within one tick while
-/// guaranteeing the cache is always stale before the next tick fires.
-const TICK_CACHE_TTL: Duration = Duration::from_millis(400);
+// ---------------------------------------------------------------------------
+// LiveCache — shared state updated reactively by the SSE task
+// ---------------------------------------------------------------------------
 
-/// Data fetched in a single pass and shared across all `get_*` calls that
-/// occur within the same dashboard tick.
-struct TickCache {
-    fetched_at: Instant,
+struct LiveCache {
+    /// Current agent status derived from `session.status` events.
     status: AgentStatus,
-    messages: Option<Vec<Value>>,
+    /// Newest ~5 messages, refreshed on `message.updated` / `message.part.updated`.
+    recent_messages: Option<Vec<Value>>,
+    /// The very first user prompt in the session. Set once, never cleared.
+    first_prompt: Option<String>,
+    /// Permanent map of (provider_id, model_id) → context window size.
+    /// Populated lazily; never evicted.
+    provider_limits: HashMap<(String, String), u64>,
 }
+
+impl LiveCache {
+    fn new() -> Self {
+        Self {
+            status: AgentStatus::Stopped,
+            recent_messages: None,
+            first_prompt: None,
+            provider_limits: HashMap::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// How many recent messages the SSE task fetches on each message event.
+// The dashboard only needs the last user message, last assistant message,
+// and the last assistant token counts — 5 is a comfortable margin.
+// ---------------------------------------------------------------------------
+const RECENT_LIMIT: usize = 5;
+
+// Minimum gap between successive tail-fetches triggered by streaming part
+// events.  Part deltas fire many times per second; without this guard each
+// delta would cause an HTTP round-trip.
+const PART_DEBOUNCE: Duration = Duration::from_millis(200);
+
+// ---------------------------------------------------------------------------
+// OpenCodeAdapter
+// ---------------------------------------------------------------------------
 
 pub struct OpenCodeAdapter {
     pub port: u16,
     pub client: Client,
-    /// Long-lived session ID cache — persists across ticks so history is
-    /// visible while the agent is idle between turns.
-    cached_session_id: Mutex<Option<String>>,
-    /// Short-lived per-tick cache — expires after `TICK_CACHE_TTL` so that
-    /// repeated `get_*` calls within the same tick share a single HTTP
-    /// round-trip without any external coordination.
-    tick_cache: Mutex<Option<TickCache>>,
+    /// Long-lived session ID shared with the SSE task — persists so history
+    /// is visible while idle.  Both the adapter and the SSE task hold a clone
+    /// of this Arc, so updates made by the task are immediately visible here.
+    cached_session_id: Arc<Mutex<Option<String>>>,
+    /// Reactive in-memory state kept up to date by the SSE background task.
+    live_cache: Arc<RwLock<LiveCache>>,
+    /// Holds the SSE task; dropped (and therefore aborted) when the adapter
+    /// is dropped.
+    _sse_task: tokio::task::JoinHandle<()>,
 }
 
 impl OpenCodeAdapter {
     pub fn new(port: u16, session_id: Option<String>) -> Self {
+        let client = Client::new();
+        let live_cache = Arc::new(RwLock::new(LiveCache::new()));
+        let cached_session_id = Arc::new(Mutex::new(session_id));
+
+        let task = tokio::spawn(run_sse_loop(
+            port,
+            client.clone(),
+            live_cache.clone(),
+            cached_session_id.clone(),
+        ));
+
         Self {
             port,
-            client: Client::new(),
-            cached_session_id: Mutex::new(session_id),
-            tick_cache: Mutex::new(None),
+            client,
+            cached_session_id,
+            live_cache,
+            _sse_task: task,
         }
     }
 
@@ -51,8 +96,8 @@ impl OpenCodeAdapter {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    /// Creates a new opencode agent: allocates port, opens tmux window, launches opencode,
-    /// waits for health. Returns (adapter, window_index).
+    /// Creates a new opencode agent: allocates port, opens tmux window, launches
+    /// opencode, waits for health.  Returns (adapter, window_index).
     pub async fn create(dir: &str, name: &str) -> anyhow::Result<(OpenCodeAdapter, usize)> {
         let port = find_free_port(14100);
         let window_index = tmux::new_window(dir, name)?;
@@ -82,114 +127,305 @@ impl OpenCodeAdapter {
             return Err(anyhow!("opencode did not become healthy within timeout"));
         }
 
-        let adapter = OpenCodeAdapter {
-            port,
-            client,
-            cached_session_id: Mutex::new(None),
-            tick_cache: Mutex::new(None),
-        };
+        // new() spawns the SSE task internally.
+        let adapter = OpenCodeAdapter::new(port, None);
         Ok((adapter, window_index))
     }
+}
 
-    /// Ensures the per-tick cache is populated and fresh.
-    ///
-    /// If the cache was filled within the last `TICK_CACHE_TTL`, this is a
-    /// no-op. Otherwise it issues exactly one `GET /session/status` and (when
-    /// a session ID is known) one `GET /session/{id}/message`, storing the
-    /// results for reuse by subsequent `get_*` calls in the same tick.
-    async fn ensure_tick_cache(&self) {
-        // Check whether the existing cache is still fresh — if so, nothing to do.
-        {
-            let guard = self.tick_cache.lock().unwrap();
-            if let Some(ref c) = *guard {
-                if c.fetched_at.elapsed() < TICK_CACHE_TTL {
-                    return;
-                }
+// ---------------------------------------------------------------------------
+// SSE background task
+// ---------------------------------------------------------------------------
+
+/// Long-running task that maintains `live_cache` by subscribing to the
+/// opencode SSE event stream.  Reconnects with exponential backoff on any
+/// error.
+async fn run_sse_loop(
+    port: u16,
+    client: Client,
+    live_cache: Arc<RwLock<LiveCache>>,
+    cached_session_id: Arc<Mutex<Option<String>>>,
+) {
+    let mut backoff_secs: u64 = 1;
+    // Tracks when we last did a tail-fetch so part-delta events can be
+    // debounced.
+    let mut last_tail_fetch = Instant::now() - PART_DEBOUNCE * 2;
+
+    loop {
+        // --- initial population -------------------------------------------
+        populate_initial(port, &client, &live_cache, &cached_session_id).await;
+
+        // --- connect to event stream ---------------------------------------
+        let url = format!("http://127.0.0.1:{}/event", port);
+        let resp = match client.get(&url).send().await {
+            Ok(r) => r,
+            Err(_) => {
+                sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(30);
+                continue;
             }
-        }
-
-        // --- fetch status + session ID ---
-        let status_url = format!("{}/session/status", self.base_url());
-        let status_body: Option<Value> = match self.client.get(&status_url).send().await {
-            Ok(resp) => resp.json().await.ok(),
-            Err(_) => None,
         };
 
-        let (session_id, status) = match status_body.as_ref().and_then(Value::as_object) {
-            None => (None, AgentStatus::Stopped),
-            Some(obj) if obj.is_empty() => {
-                // Agent is idle — fall back to the long-lived cached session ID.
-                let sid = self.cached_session_id.lock().unwrap().clone();
-                (sid, AgentStatus::WaitingForInput)
-            }
-            Some(obj) => {
-                // Pick the session with the most recent `time.updated`.
-                let id = obj
-                    .keys()
-                    .max_by_key(|id| {
-                        obj[*id]
-                            .get("time")
-                            .and_then(|t| t.get("updated"))
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0)
-                    })
-                    .map(|id| id.to_string());
+        backoff_secs = 1; // connected successfully — reset backoff
 
-                let mut best = AgentStatus::Unknown;
-                for entry in obj.values() {
-                    match entry.get("type").or_else(|| entry.get("status")).and_then(Value::as_str).unwrap_or("") {
-                        "busy" | "retry" | "running" => { best = AgentStatus::Running; break; }
-                        "idle" | "waiting" => { best = AgentStatus::WaitingForInput; }
-                        _ => {}
+        let mut stream = resp.bytes_stream();
+        let mut line_buf = String::new();
+
+        loop {
+            match stream.next().await {
+                None => break, // stream ended — reconnect
+                Some(Err(_)) => break,
+                Some(Ok(chunk)) => {
+                    // SSE uses UTF-8; ignore non-UTF-8 chunks
+                    let text = match std::str::from_utf8(&chunk) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    line_buf.push_str(text);
+
+                    // Process all complete lines in the buffer
+                    while let Some(nl) = line_buf.find('\n') {
+                        let line = line_buf[..nl].trim_end_matches('\r').to_string();
+                        line_buf.drain(..=nl);
+
+                        if let Some(json_str) = line.strip_prefix("data: ") {
+                            if let Ok(envelope) = serde_json::from_str::<Value>(json_str) {
+                                handle_event(
+                                    port,
+                                    &client,
+                                    &live_cache,
+                                    &cached_session_id,
+                                    &envelope,
+                                    &mut last_tail_fetch,
+                                )
+                                .await;
+                            }
+                        }
                     }
                 }
-                (id, best)
             }
-        };
-
-        // Keep the long-lived session ID cache up to date.
-        if let Some(ref sid) = session_id {
-            *self.cached_session_id.lock().unwrap() = Some(sid.clone());
         }
 
-        // --- fetch messages ---
-        let messages: Option<Vec<Value>> = match &session_id {
-            None => None,
-            Some(sid) => {
-                let url = format!("{}/session/{}/message", self.base_url(), sid);
-                match self.client.get(&url).send().await {
-                    Ok(resp) => resp.json().await.ok(),
-                    Err(_) => None,
+        // Stream disconnected — wait then reconnect
+        sleep(Duration::from_secs(backoff_secs)).await;
+        backoff_secs = (backoff_secs * 2).min(30);
+    }
+}
+
+/// Seed `live_cache` with current state before entering the SSE loop (or
+/// after a reconnect).
+async fn populate_initial(
+    port: u16,
+    client: &Client,
+    live_cache: &Arc<RwLock<LiveCache>>,
+    cached_session_id: &Arc<Mutex<Option<String>>>,
+) {
+    let base = format!("http://127.0.0.1:{}", port);
+
+    // --- session status ---------------------------------------------------
+    let status_url = format!("{}/session/status", base);
+    if let Ok(resp) = client.get(&status_url).send().await {
+        if let Ok(body) = resp.json::<Value>().await {
+            if let Some(obj) = body.as_object() {
+                if !obj.is_empty() {
+                    let mut best = AgentStatus::WaitingForInput;
+                    for entry in obj.values() {
+                        match entry.get("status").and_then(Value::as_str).unwrap_or("") {
+                            "busy" | "retry" => {
+                                best = AgentStatus::Running;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    let id = obj
+                        .keys()
+                        .max_by_key(|id| {
+                            obj[*id]
+                                .get("time")
+                                .and_then(|t| t.get("updated"))
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0)
+                        })
+                        .map(|id| id.to_string());
+                    if let Some(ref sid) = id {
+                        *cached_session_id.lock().unwrap() = Some(sid.clone());
+                    }
+                    live_cache.write().unwrap().status = best;
+                } else {
+                    live_cache.write().unwrap().status = AgentStatus::WaitingForInput;
                 }
             }
-        };
-
-        *self.tick_cache.lock().unwrap() = Some(TickCache {
-            fetched_at: Instant::now(),
-            status,
-            messages,
-        });
-    }
-
-    /// Returns the full message list for the current session, using the tick
-    /// cache when fresh.
-    async fn fetch_messages(&self) -> Option<Vec<Value>> {
-        self.ensure_tick_cache().await;
-        self.tick_cache.lock().unwrap()
-            .as_ref()
-            .and_then(|c| c.messages.clone())
-    }
-}
-
-pub fn find_free_port(from: u16) -> u16 {
-    let mut port = from;
-    loop {
-        if TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok() {
-            return port;
         }
-        port += 1;
+    }
+
+    // --- recent messages -------------------------------------------------
+    let sid = cached_session_id.lock().unwrap().clone();
+    if let Some(sid) = sid {
+        fetch_and_store_tail(port, client, live_cache, &sid, true).await;
     }
 }
+
+/// Dispatch a single parsed SSE event envelope.
+async fn handle_event(
+    port: u16,
+    client: &Client,
+    live_cache: &Arc<RwLock<LiveCache>>,
+    cached_session_id: &Arc<Mutex<Option<String>>>,
+    envelope: &Value,
+    last_tail_fetch: &mut Instant,
+) {
+    let event_type = match envelope.get("type").and_then(Value::as_str) {
+        Some(t) => t,
+        None => return,
+    };
+    let props = envelope.get("properties").unwrap_or(&Value::Null);
+
+    match event_type {
+        // -----------------------------------------------------------------
+        "session.status" => {
+            let sid = props
+                .get("sessionID")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+
+            let status_type = props
+                .get("status")
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("idle");
+
+            let new_status = match status_type {
+                "busy" | "retry" => AgentStatus::Running,
+                _ => AgentStatus::WaitingForInput,
+            };
+
+            if !sid.is_empty() {
+                *cached_session_id.lock().unwrap() = Some(sid.clone());
+            }
+            live_cache.write().unwrap().status = new_status;
+        }
+
+        // -----------------------------------------------------------------
+        "message.updated" => {
+            let sid = props
+                .get("sessionID")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if sid.is_empty() {
+                return;
+            }
+            *cached_session_id.lock().unwrap() = Some(sid.clone());
+            fetch_and_store_tail(port, client, live_cache, &sid, true).await;
+            *last_tail_fetch = Instant::now();
+        }
+
+        // -----------------------------------------------------------------
+        // Part events fire many times per second during streaming.
+        // Debounce to avoid an HTTP call on every token.
+        "message.part.updated" => {
+            if last_tail_fetch.elapsed() < PART_DEBOUNCE {
+                return;
+            }
+            let sid = props
+                .get("sessionID")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if sid.is_empty() {
+                return;
+            }
+            *cached_session_id.lock().unwrap() = Some(sid.clone());
+            fetch_and_store_tail(port, client, live_cache, &sid, false).await;
+            *last_tail_fetch = Instant::now();
+        }
+
+        // Sub-token streaming deltas — no useful state to cache.
+        "message.part.delta" => {}
+
+        // Reconnect confirmation — redo initial population.
+        "server.connected" => {
+            populate_initial(port, client, live_cache, cached_session_id).await;
+        }
+
+        _ => {}
+    }
+}
+
+/// Fetch the newest `RECENT_LIMIT` messages for `session_id` and write them
+/// into `live_cache.recent_messages`.
+///
+/// If `try_first_prompt` is true and `live_cache.first_prompt` is still `None`,
+/// also attempts to populate it.  For short sessions the tail already contains
+/// the first user message; for long sessions a one-time full fetch is done.
+async fn fetch_and_store_tail(
+    port: u16,
+    client: &Client,
+    live_cache: &Arc<RwLock<LiveCache>>,
+    session_id: &str,
+    try_first_prompt: bool,
+) {
+    let base = format!("http://127.0.0.1:{}", port);
+    let url = format!(
+        "{}/session/{}/message?limit={}",
+        base, session_id, RECENT_LIMIT
+    );
+    let Ok(resp) = client.get(&url).send().await else {
+        return;
+    };
+    let Ok(msgs) = resp.json::<Vec<Value>>().await else {
+        return;
+    };
+
+    let need_first_prompt =
+        try_first_prompt && live_cache.read().unwrap().first_prompt.is_none();
+
+    let first_prompt_value: Option<String> = if need_first_prompt {
+        let first_user_in_tail = msgs
+            .iter()
+            .find(|m| msg_role(m) == Some("user"))
+            .and_then(|m| first_text_part(m));
+
+        if first_user_in_tail.is_some() {
+            if msgs.len() < RECENT_LIMIT {
+                // Session is short — the tail already starts from message 0.
+                first_user_in_tail
+            } else {
+                // Session is longer than RECENT_LIMIT — do a one-time full fetch.
+                fetch_first_prompt(port, client, session_id).await
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut cache = live_cache.write().unwrap();
+    cache.recent_messages = Some(msgs);
+    if let Some(fp) = first_prompt_value {
+        cache.first_prompt = Some(fp);
+    }
+}
+
+/// One-time full fetch to extract the very first user message text.
+async fn fetch_first_prompt(port: u16, client: &Client, session_id: &str) -> Option<String> {
+    let url = format!(
+        "http://127.0.0.1:{}/session/{}/message",
+        port, session_id
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    let msgs: Vec<Value> = resp.json().await.ok()?;
+    msgs.into_iter()
+        .find(|m| msg_role(m) == Some("user"))
+        .and_then(|m| first_text_part(&m))
+}
+
+// ---------------------------------------------------------------------------
+// Message field helpers
+// ---------------------------------------------------------------------------
 
 fn first_text_part(msg: &Value) -> Option<String> {
     let parts = msg.get("parts")?.as_array()?;
@@ -218,53 +454,87 @@ fn msg_tokens(msg: &Value) -> Option<&Value> {
     msg.get("info")?.get("tokens")
 }
 
+// ---------------------------------------------------------------------------
+// Misc
+// ---------------------------------------------------------------------------
+
+pub fn find_free_port(from: u16) -> u16 {
+    let mut port = from;
+    loop {
+        if TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok() {
+            return port;
+        }
+        port += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provider context limit — resolved lazily and cached permanently
+// ---------------------------------------------------------------------------
+
 impl OpenCodeAdapter {
+    /// Returns the context-window size for `(provider_id, model_id)`.
+    ///
+    /// On the first call for a given pair this issues `GET /provider` and
+    /// stores the result in `live_cache.provider_limits`.  All subsequent
+    /// calls are pure HashMap lookups — no HTTP.
     async fn resolve_context_total(&self, provider_id: &str, model_id: &str) -> Option<u64> {
         if provider_id.is_empty() || model_id.is_empty() {
             return None;
         }
 
-        let providers_url = format!("{}/provider", self.base_url());
-        let body: Value = self
-            .client
-            .get(&providers_url)
-            .send()
-            .await
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+        let key = (provider_id.to_string(), model_id.to_string());
 
-        // Response is { "all": [ { "id": "...", "models": { "<model_id>": { ... } } } ] }
+        // Fast path — already cached
+        if let Some(&v) = self.live_cache.read().unwrap().provider_limits.get(&key) {
+            return Some(v);
+        }
+
+        // Slow path — fetch once
+        let url = format!("{}/provider", self.base_url());
+        let body: Value = self.client.get(&url).send().await.ok()?.json().await.ok()?;
+
         let providers = body.get("all").and_then(Value::as_array)?;
         let provider = providers
             .iter()
             .find(|p: &&Value| p.get("id").and_then(Value::as_str) == Some(provider_id))?;
 
-        // models is a map keyed by model id
-        provider
+        let limit = provider
             .get("models")
             .and_then(|m| m.get(model_id))
             .and_then(|m| m.get("limit"))
             .and_then(|l| l.get("context"))
-            .and_then(Value::as_u64)
+            .and_then(Value::as_u64)?;
+
+        self.live_cache
+            .write()
+            .unwrap()
+            .provider_limits
+            .insert(key, limit);
+
+        Some(limit)
     }
 }
+
+// ---------------------------------------------------------------------------
+// AgentAdapter implementation — all methods are pure in-memory reads
+// ---------------------------------------------------------------------------
 
 #[async_trait]
 impl AgentAdapter for OpenCodeAdapter {
     async fn get_status(&self) -> AgentStatus {
-        self.ensure_tick_cache().await;
-        self.tick_cache.lock().unwrap()
-            .as_ref()
-            .map(|c| c.status.clone())
-            .unwrap_or(AgentStatus::Stopped)
+        self.live_cache.read().unwrap().status.clone()
     }
 
     async fn get_context(&self) -> Option<ContextInfo> {
-        let messages: Vec<Value> = self.fetch_messages().await?;
+        let messages: Vec<Value> = self
+            .live_cache
+            .read()
+            .unwrap()
+            .recent_messages
+            .clone()?;
 
-        // Find the latest assistant message that has non-zero token usage.
+        // Find the latest assistant message with non-zero token usage.
         // In-flight messages exist but have zeroed token counts while streaming.
         let latest_assistant = messages
             .iter()
@@ -278,9 +548,10 @@ impl AgentAdapter for OpenCodeAdapter {
                     })
                     .unwrap_or(false)
             })
-            .max_by_key(|m: &&Value| msg_time_created(m))?;
+            .max_by_key(|m: &&Value| msg_time_created(m))?
+            .clone();
 
-        let tokens = msg_tokens(latest_assistant)?;
+        let tokens = msg_tokens(&latest_assistant)?.clone();
         let used = tokens.get("total").and_then(Value::as_u64).unwrap_or_else(|| {
             let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
             let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
@@ -297,7 +568,6 @@ impl AgentAdapter for OpenCodeAdapter {
             input + output + cache_read + cache_write
         });
 
-        // modelID and providerID are on the message itself
         let provider_id = latest_assistant
             .get("info")
             .and_then(|i| i.get("providerID"))
@@ -317,15 +587,11 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     async fn get_first_prompt(&self) -> Option<String> {
-        let messages: Vec<Value> = self.fetch_messages().await?;
-        messages
-            .into_iter()
-            .find(|m: &Value| msg_role(m) == Some("user"))
-            .and_then(|m| first_text_part(&m))
+        self.live_cache.read().unwrap().first_prompt.clone()
     }
 
     async fn get_last_prompt(&self) -> Option<String> {
-        let messages: Vec<Value> = self.fetch_messages().await?;
+        let messages = self.live_cache.read().unwrap().recent_messages.clone()?;
         messages
             .into_iter()
             .filter(|m: &Value| msg_role(m) == Some("user"))
@@ -334,7 +600,7 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     async fn get_last_model_response(&self) -> Option<String> {
-        let messages: Vec<Value> = self.fetch_messages().await?;
+        let messages = self.live_cache.read().unwrap().recent_messages.clone()?;
         messages
             .into_iter()
             .filter(|m: &Value| msg_role(m) == Some("assistant"))
