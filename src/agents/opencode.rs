@@ -386,7 +386,7 @@ async fn fetch_and_store_tail(
         let first_user_in_tail = msgs
             .iter()
             .find(|m| msg_role(m) == Some("user"))
-            .and_then(|m| first_text_part(m));
+            .and_then(|m| all_text_parts(m));
 
         if first_user_in_tail.is_some() {
             if msgs.len() < RECENT_LIMIT {
@@ -420,22 +420,30 @@ async fn fetch_first_prompt(port: u16, client: &Client, session_id: &str) -> Opt
     let msgs: Vec<Value> = resp.json().await.ok()?;
     msgs.into_iter()
         .find(|m| msg_role(m) == Some("user"))
-        .and_then(|m| first_text_part(&m))
+        .and_then(|m| all_text_parts(&m))
 }
 
 // ---------------------------------------------------------------------------
 // Message field helpers
 // ---------------------------------------------------------------------------
 
-fn first_text_part(msg: &Value) -> Option<String> {
+fn all_text_parts(msg: &Value) -> Option<String> {
     let parts = msg.get("parts")?.as_array()?;
-    parts.iter().find_map(|p: &Value| {
-        if p.get("type").and_then(Value::as_str) == Some("text") {
-            p.get("text").and_then(Value::as_str).map(|s| s.to_string())
-        } else {
-            None
-        }
-    })
+    let texts: Vec<&str> = parts
+        .iter()
+        .filter_map(|p: &Value| {
+            if p.get("type").and_then(Value::as_str) == Some("text") {
+                p.get("text").and_then(Value::as_str)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n"))
+    }
 }
 
 fn msg_role(msg: &Value) -> Option<&str> {
@@ -596,7 +604,7 @@ impl AgentAdapter for OpenCodeAdapter {
             .into_iter()
             .filter(|m: &Value| msg_role(m) == Some("user"))
             .last()
-            .and_then(|m| first_text_part(&m))
+            .and_then(|m| all_text_parts(&m))
     }
 
     async fn get_last_model_response(&self) -> Option<String> {
@@ -605,7 +613,7 @@ impl AgentAdapter for OpenCodeAdapter {
             .into_iter()
             .filter(|m: &Value| msg_role(m) == Some("assistant"))
             .last()
-            .and_then(|m| first_text_part(&m))
+            .and_then(|m| all_text_parts(&m))
     }
 
     fn get_cached_session_id(&self) -> Option<String> {
