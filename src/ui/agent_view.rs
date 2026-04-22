@@ -73,11 +73,9 @@ pub fn render_agent_view(
     }
 
     // Status bar
-    let refresh_str = if let Some(instant) = state.last_refresh {
-        let elapsed = instant.elapsed();
-        let secs = elapsed.as_secs();
-        if let Ok(sys_now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            let wall_secs = sys_now.as_secs().saturating_sub(secs);
+    let refresh_str = if let Some(sys_time) = state.last_refresh {
+        if let Ok(dur) = sys_time.duration_since(std::time::UNIX_EPOCH) {
+            let wall_secs = dur.as_secs();
             let h = (wall_secs / 3600) % 24;
             let m = (wall_secs / 60) % 60;
             let s = wall_secs % 60;

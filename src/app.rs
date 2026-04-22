@@ -45,7 +45,7 @@ const MAX_RETAINED_LINES: usize = 2000;
 #[derive(Debug, Default)]
 pub struct AgentViewState {
     pub lines: Vec<String>,
-    pub last_refresh: Option<std::time::Instant>,
+    pub last_refresh: Option<std::time::SystemTime>,
     pub show_stopped_overlay: bool,
     /// Cursor position within the pane's visible screen (col, row).
     pub cursor: Option<(u16, u16)>,
@@ -75,7 +75,7 @@ impl AgentViewState {
         let new_lines: Vec<String> = all_lines.map(|s| s.to_string()).collect();
         let start = new_lines.len().saturating_sub(MAX_RETAINED_LINES);
         self.lines = new_lines[start..].to_vec();
-        self.last_refresh = Some(std::time::Instant::now());
+        self.last_refresh = Some(std::time::SystemTime::now());
         true
     }
 }
