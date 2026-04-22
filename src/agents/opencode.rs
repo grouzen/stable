@@ -32,7 +32,10 @@ struct LiveCache {
 impl LiveCache {
     fn new() -> Self {
         Self {
-            status: AgentStatus::Stopped,
+            // Use Unknown rather than Stopped so that the brief window before
+            // the SSE task completes its initial population does not trigger
+            // the "agent stopped" overlay in the UI.
+            status: AgentStatus::Unknown,
             recent_messages: None,
             first_prompt: None,
             provider_limits: HashMap::new(),
