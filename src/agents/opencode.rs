@@ -142,7 +142,8 @@ impl OpenCodeAdapter {
 
 /// Long-running task that maintains `live_cache` by subscribing to the
 /// opencode SSE event stream.  Reconnects with exponential backoff on any
-/// error.
+/// error.  Sets `Stopped` in the cache when the server is unreachable so
+/// the UI can show the "agent stopped" overlay.
 async fn run_sse_loop(
     port: u16,
     client: Client,
@@ -156,13 +157,24 @@ async fn run_sse_loop(
 
     loop {
         // --- initial population -------------------------------------------
-        populate_initial(port, &client, &live_cache, &cached_session_id).await;
+        let reachable = populate_initial(port, &client, &live_cache, &cached_session_id).await;
+
+        if !reachable {
+            // Server is down — mark Stopped so the UI shows the overlay,
+            // then wait before retrying.
+            live_cache.write().unwrap().status = AgentStatus::Stopped;
+            sleep(Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(30);
+            continue;
+        }
 
         // --- connect to event stream ---------------------------------------
         let url = format!("http://127.0.0.1:{}/event", port);
         let resp = match client.get(&url).send().await {
             Ok(r) => r,
             Err(_) => {
+                // Can't reach the event endpoint — server likely just stopped.
+                live_cache.write().unwrap().status = AgentStatus::Stopped;
                 sleep(Duration::from_secs(backoff_secs)).await;
                 backoff_secs = (backoff_secs * 2).min(30);
                 continue;
@@ -216,47 +228,51 @@ async fn run_sse_loop(
 }
 
 /// Seed `live_cache` with current state before entering the SSE loop (or
-/// after a reconnect).
+/// after a reconnect).  Returns `true` if the server responded, `false` if
+/// it was unreachable (e.g. opencode has exited).
 async fn populate_initial(
     port: u16,
     client: &Client,
     live_cache: &Arc<RwLock<LiveCache>>,
     cached_session_id: &Arc<Mutex<Option<String>>>,
-) {
+) -> bool {
     let base = format!("http://127.0.0.1:{}", port);
 
     // --- session status ---------------------------------------------------
     let status_url = format!("{}/session/status", base);
-    if let Ok(resp) = client.get(&status_url).send().await {
-        if let Ok(body) = resp.json::<Value>().await {
-            if let Some(obj) = body.as_object() {
-                if !obj.is_empty() {
-                    let mut best = AgentStatus::WaitingForInput;
-                    for entry in obj.values() {
-                        match entry.get("status").and_then(Value::as_str).unwrap_or("") {
-                            "busy" | "retry" => {
-                                best = AgentStatus::Running;
-                                break;
+    match client.get(&status_url).send().await {
+        Err(_) => return false, // connection refused — server is down
+        Ok(resp) => {
+            if let Ok(body) = resp.json::<Value>().await {
+                if let Some(obj) = body.as_object() {
+                    if !obj.is_empty() {
+                        let mut best = AgentStatus::WaitingForInput;
+                        for entry in obj.values() {
+                            match entry.get("status").and_then(Value::as_str).unwrap_or("") {
+                                "busy" | "retry" => {
+                                    best = AgentStatus::Running;
+                                    break;
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
+                        let id = obj
+                            .keys()
+                            .max_by_key(|id| {
+                                obj[*id]
+                                    .get("time")
+                                    .and_then(|t| t.get("updated"))
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                            })
+                            .map(|id| id.to_string());
+                        if let Some(ref sid) = id {
+                            *cached_session_id.lock().unwrap() = Some(sid.clone());
+                        }
+                        live_cache.write().unwrap().status = best;
+                    } else {
+                        live_cache.write().unwrap().status = AgentStatus::WaitingForInput;
                     }
-                    let id = obj
-                        .keys()
-                        .max_by_key(|id| {
-                            obj[*id]
-                                .get("time")
-                                .and_then(|t| t.get("updated"))
-                                .and_then(Value::as_u64)
-                                .unwrap_or(0)
-                        })
-                        .map(|id| id.to_string());
-                    if let Some(ref sid) = id {
-                        *cached_session_id.lock().unwrap() = Some(sid.clone());
-                    }
-                    live_cache.write().unwrap().status = best;
-                } else {
-                    live_cache.write().unwrap().status = AgentStatus::WaitingForInput;
                 }
             }
         }
@@ -267,6 +283,7 @@ async fn populate_initial(
     if let Some(sid) = sid {
         fetch_and_store_tail(port, client, live_cache, &sid, true).await;
     }
+    true
 }
 
 /// Dispatch a single parsed SSE event envelope.
