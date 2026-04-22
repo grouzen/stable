@@ -137,9 +137,9 @@ impl OpenCodeAdapter {
 
                 let mut best = AgentStatus::Unknown;
                 for entry in obj.values() {
-                    match entry.get("status").and_then(Value::as_str).unwrap_or("") {
-                        "busy" | "retry" => { best = AgentStatus::Running; break; }
-                        "idle" => { best = AgentStatus::WaitingForInput; }
+                    match entry.get("type").or_else(|| entry.get("status")).and_then(Value::as_str).unwrap_or("") {
+                        "busy" | "retry" | "running" => { best = AgentStatus::Running; break; }
+                        "idle" | "waiting" => { best = AgentStatus::WaitingForInput; }
                         _ => {}
                     }
                 }
