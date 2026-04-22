@@ -531,6 +531,9 @@ impl App {
                 {
                     self.agent_view_state.show_stopped_overlay = true;
                 }
+                if prev.as_ref() != Some(&new_status) {
+                    self.dirty = true;
+                }
                 self.agent_view_state.prev_status = Some(new_status.clone());
                 if let Some(e) = self.agents.get_mut(idx) {
                     e.meta.status = new_status;
