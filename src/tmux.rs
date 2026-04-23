@@ -91,6 +91,22 @@ pub fn send_keys(target: &str, keys: &str) -> Result<()> {
     Ok(())
 }
 
+/// Send a literal byte string to a tmux pane target, bypassing key-name
+/// lookup (`send-keys -l`).  Used to forward raw escape sequences such as
+/// SGR mouse events directly to the application running inside the pane.
+pub fn send_literal(target: &str, data: &str) -> Result<()> {
+    Tmux::with_command(
+        SendKeys::new()
+            .target_pane(target)
+            .disable_lookup()
+            .key(data)
+            .build(),
+    )
+    .status()
+    .with_context(|| format!("failed to send literal to {}", target))?;
+    Ok(())
+}
+
 /// Capture the raw ANSI output of the pane's current visible viewport (`-p -e`).
 ///
 /// We intentionally omit `-S -` (full scrollback) because:

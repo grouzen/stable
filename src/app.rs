@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::{interval, Duration};
 
@@ -306,13 +306,80 @@ impl App {
         let AppState::AgentView(idx) = self.state else {
             return;
         };
-        let keys = match mouse.kind {
-            MouseEventKind::ScrollUp => "PPage",
-            MouseEventKind::ScrollDown => "NPage",
+
+        // Scroll events are forwarded as named tmux keys.
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if let Some(entry) = self.agents.get(idx) {
+                    let _ = tmux::send_keys(&entry.config.pane, "PPage");
+                }
+                return;
+            }
+            MouseEventKind::ScrollDown => {
+                if let Some(entry) = self.agents.get(idx) {
+                    let _ = tmux::send_keys(&entry.config.pane, "NPage");
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // For all other mouse events, forward as an SGR escape sequence via
+        // `send-keys -l` so the application inside the pane receives them.
+
+        // Guard: skip events on the status bar (last row of the terminal).
+        let term_height = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+        if mouse.row >= term_height.saturating_sub(1) {
+            return;
+        }
+
+        // Guard: don't forward while the "agent stopped" overlay is visible.
+        if self.agent_view_state.show_stopped_overlay {
+            return;
+        }
+
+        // Map event kind → (SGR button code, is_press).
+        // SGR button encoding: 0=left 1=middle 2=right; drag adds 32; hover=35.
+        // Modifiers: Shift+4, Alt+8, Ctrl+16.
+        let (mut cb, press) = match mouse.kind {
+            MouseEventKind::Down(btn) => (Self::sgr_button(btn), true),
+            MouseEventKind::Up(btn) => (Self::sgr_button(btn), false),
+            MouseEventKind::Drag(btn) => (Self::sgr_button(btn) + 32, true),
+            MouseEventKind::Moved => (35u8, true),
             _ => return,
         };
+
+        if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+            cb += 4;
+        }
+        if mouse.modifiers.contains(KeyModifiers::ALT) {
+            cb += 8;
+        }
+        if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+            cb += 16;
+        }
+
+        // SGR format: ESC [ < Cb ; Cx ; Cy M (press) or m (release).
+        // Coordinates are 1-based.
+        let suffix = if press { 'M' } else { 'm' };
+        let seq = format!(
+            "\x1b[<{};{};{}{}",
+            cb,
+            mouse.column + 1,
+            mouse.row + 1,
+            suffix
+        );
+
         if let Some(entry) = self.agents.get(idx) {
-            let _ = tmux::send_keys(&entry.config.pane, keys);
+            let _ = tmux::send_literal(&entry.config.pane, &seq);
+        }
+    }
+
+    fn sgr_button(btn: MouseButton) -> u8 {
+        match btn {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
         }
     }
 
