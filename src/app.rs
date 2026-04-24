@@ -29,6 +29,7 @@ pub enum AppState {
 pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    Paste(String),
     DashboardTick,
     AgentViewTick,
 }
@@ -256,6 +257,9 @@ impl App {
                     CEvent::Mouse(m) => {
                         let _ = tx.send(Event::Mouse(m));
                     }
+                    CEvent::Paste(text) => {
+                        let _ = tx.send(Event::Paste(text));
+                    }
 
                     _ => {}
                 }
@@ -297,6 +301,11 @@ impl App {
             Event::Mouse(mouse) => {
                 self.dirty = true;
                 self.handle_mouse(mouse);
+                true
+            }
+            Event::Paste(text) => {
+                self.dirty = true;
+                self.handle_paste(text);
                 true
             }
             Event::DashboardTick => {
@@ -403,6 +412,25 @@ impl App {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
             MouseButton::Right => 2,
+        }
+    }
+
+    /// Forward a paste event to the active tmux pane using bracketed paste
+    /// sequences (`\x1b[200~...\x1b[201~`).  This tells the editor inside the
+    /// pane to suppress auto-indentation for the pasted content, fixing broken
+    /// indentation.  The entire text is sent in a single `send_literal` call
+    /// (one tmux subprocess) rather than character-by-character, which makes
+    /// pasting large blocks of text fast.
+    fn handle_paste(&mut self, text: String) {
+        let AppState::AgentView(idx) = self.state else {
+            return;
+        };
+        if self.agent_view_state.show_stopped_overlay {
+            return;
+        }
+        if let Some(entry) = self.agents.get(idx) {
+            let seq = format!("\x1b[200~{}\x1b[201~", text);
+            let _ = tmux::send_literal(&entry.config.pane, &seq);
         }
     }
 
