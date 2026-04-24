@@ -322,7 +322,88 @@ impl App {
         }
     }
 
+    /// Returns the dashboard card slot index (into `self.agents`) for a given
+    /// terminal cell `(col, row)`, or `None` if the position is out of bounds
+    /// (e.g. the keybindings bar row) or the agents list is empty.
+    fn dashboard_slot_at(&self, col: u16, row: u16) -> Option<usize> {
+        let n = self.agents.len();
+        if n == 0 {
+            return None;
+        }
+        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+        // The bottom row is the keybindings bar — ignore clicks there.
+        if row >= term_h.saturating_sub(1) {
+            return None;
+        }
+        let main_h = term_h.saturating_sub(1);
+        let (cols, rows) = grid_layout(n);
+        let cell_w = term_w / cols as u16;
+        let cell_h = main_h / rows as u16;
+        if cell_w == 0 || cell_h == 0 {
+            return None;
+        }
+        let c = (col / cell_w).min(cols as u16 - 1) as usize;
+        let r = (row / cell_h).min(rows as u16 - 1) as usize;
+        let slot = r * cols + c;
+        if slot < n { Some(slot) } else { None }
+    }
+
+    fn handle_dashboard_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(_) => {
+                if let Some(slot) = self.dashboard_slot_at(mouse.column, mouse.row) {
+                    self.selected = slot;
+                    self.dirty = true;
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if let Some(slot) = self.dashboard_slot_at(mouse.column, mouse.row) {
+                    if let Some(s) = self.card_scroll.get_mut(slot) {
+                        *s = s.saturating_sub(1);
+                        self.dirty = true;
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if let Some(slot) = self.dashboard_slot_at(mouse.column, mouse.row) {
+                    let viewport_h = self
+                        .card_response_heights
+                        .get(slot)
+                        .copied()
+                        .unwrap_or(1)
+                        .max(1);
+                    let content_w = self
+                        .card_response_widths
+                        .get(slot)
+                        .copied()
+                        .unwrap_or(80)
+                        .max(1);
+                    let max_scroll = self
+                        .agents
+                        .get(slot)
+                        .and_then(|e| e.meta.last_model_response.as_deref())
+                        .map(|r| {
+                            let text = tui_markdown::from_str(r);
+                            let total = wrapped_line_count(&text, content_w);
+                            total.saturating_sub(viewport_h)
+                        })
+                        .unwrap_or(0);
+                    if let Some(s) = self.card_scroll.get_mut(slot) {
+                        *s = s.saturating_add(1).min(max_scroll);
+                        self.dirty = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if matches!(self.state, AppState::Dashboard) {
+            self.handle_dashboard_mouse(mouse);
+            return;
+        }
+
         let AppState::AgentView(idx) = self.state else {
             return;
         };
@@ -453,7 +534,25 @@ impl App {
     // Dashboard key handler
     // -----------------------------------------------------------------------
 
+    /// Swap the selected card with `target`, keeping `selected` tracking the
+    /// moved card.  Scroll offsets and cached geometry follow the swap.
+    fn move_card(&mut self, target: usize) {
+        self.agents.swap(self.selected, target);
+        self.adapters.swap(self.selected, target);
+        self.config.agents.swap(self.selected, target);
+        self.card_scroll.swap(self.selected, target);
+        let max_idx = self.selected.max(target);
+        if self.card_response_heights.len() > max_idx {
+            self.card_response_heights.swap(self.selected, target);
+            self.card_response_widths.swap(self.selected, target);
+        }
+        self.selected = target;
+        self.dirty = true;
+        let _ = self.config.save();
+    }
+
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') => return false,
             KeyCode::Char('n') => {
@@ -471,10 +570,52 @@ impl App {
                     self.state = AppState::AgentView(self.selected);
                 }
             }
+            // ---------------------------------------------------------------
+            // Card movement: Ctrl+arrows / Ctrl+hjkl
+            // ---------------------------------------------------------------
+            KeyCode::Left if ctrl => {
+                if !self.agents.is_empty() {
+                    let (cols, _) = grid_layout(self.agents.len());
+                    // Mirror navigate-left wrapping: not at leftmost col OR
+                    // not on first row (wrap to last slot of previous row).
+                    if self.selected % cols > 0 || self.selected >= cols {
+                        self.move_card(self.selected - 1);
+                    }
+                }
+            }
+            KeyCode::Right if ctrl => {
+                if !self.agents.is_empty() {
+                    // Mirror navigate-right wrapping: any next card exists.
+                    if self.selected + 1 < self.agents.len() {
+                        self.move_card(self.selected + 1);
+                    }
+                }
+            }
+            KeyCode::Up if ctrl => {
+                if !self.agents.is_empty() {
+                    let (cols, _) = grid_layout(self.agents.len());
+                    if self.selected >= cols {
+                        self.move_card(self.selected - cols);
+                    }
+                }
+            }
+            KeyCode::Down if ctrl => {
+                if !self.agents.is_empty() {
+                    let (cols, _) = grid_layout(self.agents.len());
+                    if self.selected + cols < self.agents.len() {
+                        self.move_card(self.selected + cols);
+                    }
+                }
+            }
+            // ---------------------------------------------------------------
+            // Navigation: arrows / hjkl (with Left/Right row-edge wrapping)
+            // ---------------------------------------------------------------
             KeyCode::Left | KeyCode::Char('h') => {
                 if !self.agents.is_empty() {
                     let (cols, _) = grid_layout(self.agents.len());
-                    if self.selected % cols > 0 {
+                    // Move left within row; at col 0 wrap to last slot of
+                    // the previous row (same index arithmetic: selected - 1).
+                    if self.selected % cols > 0 || self.selected >= cols {
                         self.selected -= 1;
                         self.reset_card_scroll();
                     }
@@ -482,8 +623,9 @@ impl App {
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 if !self.agents.is_empty() {
-                    let (cols, _) = grid_layout(self.agents.len());
-                    if self.selected % cols < cols - 1 && self.selected + 1 < self.agents.len() {
+                    // Move right within row; at last col wrap to first slot
+                    // of the next row, as long as a next card exists.
+                    if self.selected + 1 < self.agents.len() {
                         self.selected += 1;
                         self.reset_card_scroll();
                     }

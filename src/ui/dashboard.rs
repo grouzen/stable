@@ -9,6 +9,24 @@ use ratatui::{
 use crate::models::{AgentEntry, AgentStatus};
 
 // ---------------------------------------------------------------------------
+// Status count helpers (used by keybindings bar)
+// ---------------------------------------------------------------------------
+
+fn count_running(agents: &[AgentEntry]) -> usize {
+    agents
+        .iter()
+        .filter(|a| matches!(a.meta.status, AgentStatus::Running))
+        .count()
+}
+
+fn count_waiting(agents: &[AgentEntry]) -> usize {
+    agents
+        .iter()
+        .filter(|a| matches!(a.meta.status, AgentStatus::WaitingForInput))
+        .count()
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -30,7 +48,7 @@ pub fn render_dashboard(
     let main_area = chunks[0];
     let bar_area = chunks[1];
 
-    render_keybindings_bar(f, bar_area);
+    render_keybindings_bar(f, bar_area, agents);
     render_grid(
         f,
         main_area,
@@ -493,10 +511,35 @@ fn render_card(
 // Keybindings bar
 // ---------------------------------------------------------------------------
 
-fn render_keybindings_bar(f: &mut Frame, area: Rect) {
-    let bar = Paragraph::new(
-        "[n] New  [d] Delete  [Enter] Open  [←↓↑→/hjkl] Navigate  [PgUp/PgDn] Scroll response  [q] Quit",
-    )
-    .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(bar, area);
+fn render_keybindings_bar(f: &mut Frame, area: Rect, agents: &[AgentEntry]) {
+    let running = count_running(agents);
+    let waiting = count_waiting(agents);
+
+    let hints = "[n] New  [d] Del  [Enter] Open  [←↓↑→/hjkl] Navigate  \
+                 [Ctrl+←↓↑→] Move card  [PgUp/Dn] Scroll  [q] Quit";
+
+    let status_line = Line::from(vec![
+        Span::styled(hints, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("  ● {} running", running),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(
+            format!("  ⏸ {} waiting", waiting),
+            Style::default().fg(Color::Yellow),
+        ),
+    ]);
+
+    let hint = " Shift+drag to select";
+    let hint_width = hint.len() as u16;
+    let bar_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(hint_width)])
+        .split(area);
+
+    f.render_widget(Paragraph::new(status_line), bar_chunks[0]);
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        bar_chunks[1],
+    );
 }
