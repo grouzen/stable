@@ -45,6 +45,8 @@ async fn main() -> Result<()> {
                 first_prompt: None,
                 last_prompt: None,
                 last_model_response: None,
+                model_name: None,
+                total_work_ms: 0,
             },
         });
         adapters.push(Box::new(adapter));

@@ -566,6 +566,8 @@ impl App {
             let first_prompt = self.adapters[i].get_first_prompt().await;
             let last_prompt = self.adapters[i].get_last_prompt().await;
             let last_model_response = self.adapters[i].get_last_model_response().await;
+            let model_name = self.adapters[i].get_model_name().await;
+            let total_work_ms = self.adapters[i].get_total_work_ms().await;
 
             // Persist newly discovered session IDs so the dashboard shows
             // correct history immediately on the next startup.
@@ -583,6 +585,8 @@ impl App {
                 entry.meta.first_prompt = first_prompt;
                 entry.meta.last_prompt = last_prompt;
                 entry.meta.last_model_response = last_model_response;
+                entry.meta.model_name = model_name;
+                entry.meta.total_work_ms = total_work_ms;
             }
         }
         // Ensure card_scroll has an entry for every agent (agents may be added at runtime).

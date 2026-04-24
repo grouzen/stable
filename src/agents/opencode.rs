@@ -27,18 +27,28 @@ struct LiveCache {
     /// Permanent map of (provider_id, model_id) → context window size.
     /// Populated lazily; never evicted.
     provider_limits: HashMap<(String, String), u64>,
+    /// Model ID from the most recent assistant message (e.g. "claude-sonnet-4-5").
+    model_id: Option<String>,
+    /// Sum of (time.completed - time.created) for every assistant message, in ms.
+    total_work_ms: u64,
+    /// The highest `time.created` among assistant messages already counted in
+    /// `total_work_ms`. Used to avoid double-counting on incremental tail updates.
+    last_counted_assistant_created: u64,
+    /// True once a full-session scan has been done to initialise `total_work_ms`.
+    work_time_initialized: bool,
 }
 
 impl LiveCache {
     fn new() -> Self {
         Self {
-            // Use Unknown rather than Stopped so that the brief window before
-            // the SSE task completes its initial population does not trigger
-            // the "agent stopped" overlay in the UI.
             status: AgentStatus::Unknown,
             recent_messages: None,
             first_prompt: None,
             provider_limits: HashMap::new(),
+            model_id: None,
+            total_work_ms: 0,
+            last_counted_assistant_created: 0,
+            work_time_initialized: false,
         }
     }
 }
@@ -402,6 +412,10 @@ async fn fetch_and_store_tail(
 
     let need_first_prompt =
         try_first_prompt && live_cache.read().unwrap().first_prompt.is_none();
+    let need_work_init = !live_cache.read().unwrap().work_time_initialized;
+    // If the session is long (tail is full), do a one-time full fetch for both
+    // first_prompt and total_work_ms initialisation.
+    let is_long_session = msgs.len() >= RECENT_LIMIT;
 
     let first_prompt_value: Option<String> = if need_first_prompt {
         let first_user_in_tail = msgs
@@ -410,7 +424,7 @@ async fn fetch_and_store_tail(
             .and_then(|m| all_text_parts(m));
 
         if first_user_in_tail.is_some() {
-            if msgs.len() < RECENT_LIMIT {
+            if !is_long_session {
                 // Session is short — the tail already starts from message 0.
                 first_user_in_tail
             } else {
@@ -424,7 +438,37 @@ async fn fetch_and_store_tail(
         None
     };
 
+    // Compute total work time. For long sessions initialise from a full fetch;
+    // for short sessions (or after init) use the tail incrementally.
+    let full_msgs_for_work: Option<Vec<Value>> = if need_work_init && is_long_session {
+        let url = format!("http://127.0.0.1:{}/session/{}/message", port, session_id);
+        match client.get(&url).send().await {
+            Ok(r) => r.json::<Vec<Value>>().await.ok(),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     let mut cache = live_cache.write().unwrap();
+
+    if need_work_init {
+        // Seed total_work_ms from either the full fetch or the short tail.
+        let source = full_msgs_for_work.as_deref().unwrap_or(&msgs);
+        let (sum, max_created) = assistant_work_sum(source);
+        cache.total_work_ms = sum;
+        cache.last_counted_assistant_created = max_created;
+        cache.work_time_initialized = true;
+    } else {
+        // Incremental update: only count assistant messages newer than what we've seen.
+        let threshold = cache.last_counted_assistant_created;
+        let (delta, max_created) = assistant_work_sum_after(&msgs, threshold);
+        cache.total_work_ms += delta;
+        if max_created > cache.last_counted_assistant_created {
+            cache.last_counted_assistant_created = max_created;
+        }
+    }
+
     cache.recent_messages = Some(msgs);
     if let Some(fp) = first_prompt_value {
         cache.first_prompt = Some(fp);
@@ -447,6 +491,60 @@ async fn fetch_first_prompt(port: u16, client: &Client, session_id: &str) -> Opt
 // ---------------------------------------------------------------------------
 // Message field helpers
 // ---------------------------------------------------------------------------
+
+/// Returns `info.time.completed` for a message (0 if absent).
+fn msg_time_completed(msg: &Value) -> u64 {
+    msg.get("info")
+        .and_then(|i| i.get("time"))
+        .and_then(|t| t.get("completed"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// Sums `(time.completed - time.created)` for all assistant messages.
+/// Returns `(total_ms, max_time_created)`.
+fn assistant_work_sum(msgs: &[Value]) -> (u64, u64) {
+    let mut total: u64 = 0;
+    let mut max_created: u64 = 0;
+    for m in msgs {
+        if msg_role(m) != Some("assistant") {
+            continue;
+        }
+        let created = msg_time_created(m);
+        let completed = msg_time_completed(m);
+        if completed > created {
+            total += completed - created;
+        }
+        if created > max_created {
+            max_created = created;
+        }
+    }
+    (total, max_created)
+}
+
+/// Like `assistant_work_sum` but only considers messages with
+/// `time.created > threshold` (for incremental updates).
+fn assistant_work_sum_after(msgs: &[Value], threshold: u64) -> (u64, u64) {
+    let mut total: u64 = 0;
+    let mut max_created: u64 = 0;
+    for m in msgs {
+        if msg_role(m) != Some("assistant") {
+            continue;
+        }
+        let created = msg_time_created(m);
+        if created <= threshold {
+            continue;
+        }
+        let completed = msg_time_completed(m);
+        if completed > created {
+            total += completed - created;
+        }
+        if created > max_created {
+            max_created = created;
+        }
+    }
+    (total, max_created)
+}
 
 fn all_text_parts(msg: &Value) -> Option<String> {
     let parts = msg.get("parts")?.as_array()?;
@@ -612,6 +710,11 @@ impl AgentAdapter for OpenCodeAdapter {
 
         let total = self.resolve_context_total(&provider_id, &model_id).await;
 
+        // Persist the model ID so the card can display it.
+        if !model_id.is_empty() {
+            self.live_cache.write().unwrap().model_id = Some(model_id);
+        }
+
         Some(ContextInfo { used, total })
     }
 
@@ -668,5 +771,13 @@ impl AgentAdapter for OpenCodeAdapter {
 
     fn get_cached_session_id(&self) -> Option<String> {
         self.cached_session_id.lock().unwrap().clone()
+    }
+
+    async fn get_model_name(&self) -> Option<String> {
+        self.live_cache.read().unwrap().model_id.clone()
+    }
+
+    async fn get_total_work_ms(&self) -> u64 {
+        self.live_cache.read().unwrap().total_work_ms
     }
 }

@@ -21,6 +21,10 @@ pub struct AgentMeta {
     pub first_prompt: Option<String>,
     pub last_prompt: Option<String>,
     pub last_model_response: Option<String>,
+    /// Model identifier reported by the agent (e.g. "claude-sonnet-4-5").
+    pub model_name: Option<String>,
+    /// Total milliseconds spent on model responses across the session.
+    pub total_work_ms: u64,
 }
 
 impl Default for AgentMeta {
@@ -31,6 +35,8 @@ impl Default for AgentMeta {
             first_prompt: None,
             last_prompt: None,
             last_model_response: None,
+            model_name: None,
+            total_work_ms: 0,
         }
     }
 }

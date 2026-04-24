@@ -197,6 +197,33 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
 }
 
+/// Replaces the home directory prefix with `~` for compact display.
+fn shellify_dir(dir: &str) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = dir.strip_prefix(&home) {
+            return format!("~{}", rest);
+        }
+    }
+    dir.to_string()
+}
+
+/// Formats a millisecond duration into a human-readable string
+/// (e.g. "3h 12m", "45m", "< 1m").
+fn format_uptime(ms: u64) -> String {
+    let secs = ms / 1000;
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else if mins > 0 {
+        format!("{}m", mins)
+    } else if secs > 0 {
+        format!("{}s", secs)
+    } else {
+        "< 1s".to_string()
+    }
+}
+
 fn render_card(
     f: &mut Frame,
     area: Rect,
@@ -240,7 +267,7 @@ fn render_card(
     // Compute header content
     // -----------------------------------------------------------------------
 
-    // Row 0: ctx (left) + status (right) — always height 3
+    // Row 0: ctx + work time (left) + status (right) — always height 3
     let sym = status_symbol(&entry.meta.status);
     let lbl = status_label(&entry.meta.status);
     let col = status_color(&entry.meta.status);
@@ -256,11 +283,18 @@ fn render_card(
         "—".to_string()
     };
 
+    let work_text = if entry.meta.total_work_ms > 0 {
+        format!(" ⏱ {}", format_uptime(entry.meta.total_work_ms))
+    } else {
+        String::new()
+    };
+    let left_text = format!("{}{}", ctx_text, work_text);
+
     let status_str = format!("{} {}", sym, lbl);
     let avail = inner.width as usize;
-    let padding = avail.saturating_sub(ctx_text.len() + status_str.len());
+    let padding = avail.saturating_sub(left_text.chars().count() + status_str.len());
     let row0 = Line::from(vec![
-        Span::raw(format!("{}{}", ctx_text, " ".repeat(padding))),
+        Span::raw(format!("{}{}", left_text, " ".repeat(padding))),
         Span::styled(status_str, Style::default().fg(col)),
     ]);
 
@@ -277,7 +311,26 @@ fn render_card(
     let row1_h = prompt_h;
     let row2_h = if show_last { prompt_h } else { 0 };
     let row0_h: u16 = 2;
-    let header_lines = row0_h + row1_h + row2_h;
+
+    // --- Info row A: directory ---
+    let dir_str = shellify_dir(&entry.config.directory);
+    let info_a = Line::from(vec![Span::styled(
+        dir_str,
+        Style::default().fg(Color::DarkGray),
+    )]);
+
+    // --- Info row B: agent_type · model_name ---
+    let agent_type = &entry.config.agent_type;
+    let model_str = entry.meta.model_name.as_deref().unwrap_or("—");
+    let info_b = Line::from(vec![
+        Span::styled(agent_type.as_str(), Style::default().fg(Color::DarkGray)),
+        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+        Span::styled(model_str, Style::default().fg(Color::DarkGray)),
+    ]);
+
+    let info_row_h: u16 = 1;
+    let info_row_b_h: u16 = 2; // 1 text + 1 empty margin line
+    let header_lines = row0_h + info_row_h + info_row_b_h + row1_h + row2_h;
 
     // -----------------------------------------------------------------------
     // Layout: header + response block
@@ -350,7 +403,12 @@ fn render_card(
     };
 
     // Build header row areas
-    let mut constraints = vec![Constraint::Length(row0_h), Constraint::Length(row1_h)];
+    let mut constraints = vec![
+        Constraint::Length(row0_h),
+        Constraint::Length(info_row_h),
+        Constraint::Length(info_row_b_h),
+        Constraint::Length(row1_h),
+    ];
     if show_last {
         constraints.push(Constraint::Length(row2_h));
     }
@@ -360,9 +418,11 @@ fn render_card(
         .split(header_area);
 
     render_centered(f, header_splits[0], row0, row0_h);
-    render_prompt(f, header_splits[1], fp_text, row1_h);
+    f.render_widget(Paragraph::new(info_a), header_splits[1]);
+    f.render_widget(Paragraph::new(info_b), header_splits[2]);
+    render_prompt(f, header_splits[3], fp_text, row1_h);
     if show_last {
-        render_prompt(f, header_splits[2], lp_text, row2_h);
+        render_prompt(f, header_splits[4], lp_text, row2_h);
     }
 
     // -----------------------------------------------------------------------
