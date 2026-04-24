@@ -161,6 +161,19 @@ pub fn cursor_position(target: &str) -> Option<(u16, u16)> {
     Some((x, y))
 }
 
+/// Return `true` if the process running in the pane has enabled any form of
+/// mouse reporting (`#{mouse_any_flag}` == 1).  Used to decide whether to
+/// forward hover/motion mouse events: forwarding them to an application that
+/// has NOT enabled mouse mode causes the leading ESC byte to be misinterpreted
+/// as the Escape key, resetting insert-mode in editors like vim.
+pub fn pane_mouse_active(target: &str) -> bool {
+    Command::new("tmux")
+        .args(["display-message", "-t", target, "-p", "#{mouse_any_flag}"])
+        .output()
+        .map(|o| o.stdout.first().copied() == Some(b'1'))
+        .unwrap_or(false)
+}
+
 /// Check whether a pane is alive by querying its pid.
 pub fn is_alive(target: &str) -> bool {
     Command::new("tmux")

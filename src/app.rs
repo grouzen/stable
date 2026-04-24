@@ -49,6 +49,17 @@ pub struct AgentViewState {
     pub show_stopped_overlay: bool,
     /// Cursor position within the pane's visible screen (col, row).
     pub cursor: Option<(u16, u16)>,
+    /// Last dimensions sent to tmux resize-window (width, height).  Used to
+    /// skip redundant resize calls that would otherwise send SIGWINCH to any
+    /// process (e.g. vim) running inside the pane on every dirty frame.
+    pub last_pane_size: Option<(u16, u16)>,
+    /// Whether the process currently running in the pane has enabled any mouse
+    /// reporting mode (tmux #{mouse_any_flag}).  Polled every tick so that
+    /// hover / all-motion events are only forwarded when the pane application
+    /// actually expects them.  When false (e.g. vim opened as $EDITOR without
+    /// `set mouse=a`), forwarding hover events would send a leading ESC byte
+    /// that exits insert mode.
+    pub pane_mouse_active: bool,
     /// Track previous status to detect edge transitions
     prev_status: Option<AgentStatus>,
     /// Byte length of the last captured raw string, used to skip no-op ticks.
@@ -341,6 +352,18 @@ impl App {
         // Map event kind → (SGR button code, is_press).
         // SGR button encoding: 0=left 1=middle 2=right; drag adds 32; hover=35.
         // Modifiers: Shift+4, Alt+8, Ctrl+16.
+        //
+        // Hover / all-motion events (Moved) are only forwarded when the pane
+        // application has enabled mouse reporting (#{mouse_any_flag} == 1).
+        // If the pane application has NOT enabled mouse mode — for example vim
+        // opened as $EDITOR without `set mouse=a` — the leading \x1b of the
+        // SGR hover sequence would be interpreted as Escape, exiting insert
+        // mode and potentially triggering normal-mode commands (the trailing
+        // 'M' maps to vim's "move to middle of screen").
+        if mouse.kind == MouseEventKind::Moved && !self.agent_view_state.pane_mouse_active {
+            return;
+        }
+
         let (mut cb, press) = match mouse.kind {
             MouseEventKind::Down(btn) => (Self::sgr_button(btn), true),
             MouseEventKind::Up(btn) => (Self::sgr_button(btn), false),
@@ -586,6 +609,26 @@ impl App {
             if new_cursor != self.agent_view_state.cursor {
                 self.agent_view_state.cursor = new_cursor;
                 self.dirty = true;
+            }
+
+            // Track whether the pane application has mouse mode enabled.
+            // Hover events are only forwarded when this is true, to avoid
+            // sending a raw ESC byte to programs (e.g. vim as $EDITOR) that
+            // have not requested mouse input.
+            self.agent_view_state.pane_mouse_active = tmux::pane_mouse_active(&pane);
+
+            // Resize the tmux window to fill the viewport, but only when the
+            // terminal dimensions have actually changed.  Calling resize-window
+            // on every tick would send SIGWINCH to any process running in the
+            // pane (e.g. vim), causing it to redraw, move the cursor, and
+            // potentially reset the editing mode on every poll cycle.
+            if let Ok((term_cols, term_rows)) = crossterm::terminal::size() {
+                let content_height = term_rows.saturating_sub(1); // reserve status bar row
+                let desired = (term_cols, content_height);
+                if self.agent_view_state.last_pane_size != Some(desired) {
+                    let _ = tmux::resize_window(&pane, term_cols, content_height);
+                    self.agent_view_state.last_pane_size = Some(desired);
+                }
             }
 
             // Update status via adapter

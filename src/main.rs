@@ -68,10 +68,6 @@ async fn main() -> Result<()> {
                         }
                         app::AppState::AgentView(idx) => {
                             if let Some(entry) = app.agents.get(*idx) {
-                                // Content area is full area minus 1 row for the status bar.
-                                // Resize the tmux window to match so capture_pane fills the viewport.
-                                let content_height = area.height.saturating_sub(1);
-                                let _ = tmux::resize_window(&entry.config.pane, area.width, content_height);
                                 ui::agent_view::render_agent_view(
                                     f,
                                     area,
