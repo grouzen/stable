@@ -1,0 +1,48 @@
+use crate::config::AgentConfig;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentStatus {
+    Running,
+    WaitingForInput,
+    Stopped,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextInfo {
+    pub used: u64,
+    pub total: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentMeta {
+    pub status: AgentStatus,
+    pub context: Option<ContextInfo>,
+    pub first_prompt: Option<String>,
+    pub last_prompt: Option<String>,
+    pub last_model_response: Option<String>,
+    /// Model identifier reported by the agent (e.g. "claude-sonnet-4-5").
+    pub model_name: Option<String>,
+    /// Total milliseconds spent on model responses across the session.
+    pub total_work_ms: u64,
+}
+
+impl Default for AgentMeta {
+    fn default() -> Self {
+        Self {
+            status: AgentStatus::Unknown,
+            context: None,
+            first_prompt: None,
+            last_prompt: None,
+            last_model_response: None,
+            model_name: None,
+            total_work_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentEntry {
+    pub config: AgentConfig,
+    pub meta: AgentMeta,
+}
