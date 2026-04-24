@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+use std::collections::HashMap;
 
 use crate::app::AgentViewState;
 use crate::models::{AgentEntry, AgentStatus};
@@ -44,15 +45,23 @@ pub fn render_agent_view(
         .into_text()
         .unwrap_or_else(|_| ratatui::text::Text::raw(visible_text.clone()));
 
-    // Use the first background colour found in the parsed ANSI content as the
-    // base style for the paragraph.  Cells that carry no explicit background
-    // code (e.g. default-colour spaces around a modal overlay) will then
-    // inherit the pane's own background rather than stable's terminal default.
-    let base_bg = text
-        .lines
-        .iter()
-        .flat_map(|l| l.spans.iter())
-        .find_map(|s| s.style.bg);
+    // Use the most frequently occurring background colour in the parsed ANSI
+    // content as the base style for the paragraph.  This lets cells without an
+    // explicit background (e.g. spaces around a modal overlay) inherit the
+    // pane's own background rather than stable's terminal default, while
+    // avoiding transient per-character highlights (e.g. vim's MatchParen on
+    // bracket characters) from hijacking the whole-pane background.
+    let base_bg = {
+        let mut freq: HashMap<Color, usize> = HashMap::new();
+        for span in text.lines.iter().flat_map(|l| l.spans.iter()) {
+            if let Some(bg) = span.style.bg {
+                *freq.entry(bg).or_insert(0) += span.content.len();
+            }
+        }
+        freq.into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(color, _)| color)
+    };
     let base_style = match base_bg {
         Some(bg) => Style::default().bg(bg),
         None => Style::default(),
