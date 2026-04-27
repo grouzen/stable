@@ -895,7 +895,7 @@ impl App {
                     let dir = self.create_state.directory.clone();
                     match OpenCodeAdapter::create(&dir, &name).await {
                         Ok((adapter, window_index)) => {
-                            let pane = format!("stable:{}.0", window_index);
+                            let pane = format!("{}:{}.0", tmux::session_name(), window_index);
                             let config = AgentConfig {
                                 name: name.clone(),
                                 pane: pane.clone(),
@@ -1000,7 +1000,7 @@ impl App {
 
         match OpenCodeAdapter::restart(&dir, &name, session_id.as_deref()).await {
             Ok((new_adapter, window_index, new_port)) => {
-                let new_pane = format!("stable:{}.0", window_index);
+                let new_pane = format!("{}:{}.0", tmux::session_name(), window_index);
 
                 // Update persisted config.
                 if let Some(c) = self.config.agents.get_mut(idx) {

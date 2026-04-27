@@ -82,7 +82,7 @@ async fn launch(
     session_id: Option<&str>,
 ) -> anyhow::Result<(usize, String)> {
     let window_index = tmux::new_window(dir, name)?;
-    let pane = format!("stable:{}.0", window_index);
+    let pane = format!("{}:{}.0", tmux::session_name(), window_index);
 
     let cmd = match session_id {
         Some(sid) => format!("opencode --port {} --session {}\n", port, sid),
