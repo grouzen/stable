@@ -833,6 +833,11 @@ impl App {
     async fn handle_agent_view_key(&mut self, key: KeyEvent, idx: usize) -> bool {
         if self.agent_view_state.show_stopped_overlay {
             match key.code {
+                KeyCode::Char('r') => {
+                    self.restart_agent(idx).await;
+                    self.agent_view_state.show_stopped_overlay = false;
+                    self.dirty = true;
+                }
                 KeyCode::Char('d') => {
                     self.remove_agent(idx);
                     self.state = AppState::Dashboard;
@@ -980,6 +985,44 @@ impl App {
             // Adjust selected if needed
             if self.selected >= self.agents.len() && !self.agents.is_empty() {
                 self.selected = self.agents.len() - 1;
+            }
+        }
+    }
+
+    /// Restart a stopped agent: scan for a free port, open a new tmux window,
+    /// launch opencode with `--session <id>` to resume the existing session,
+    /// then update the in-memory state and persist the config.
+    pub async fn restart_agent(&mut self, idx: usize) {
+        let (dir, name, session_id) = match self.config.agents.get(idx) {
+            Some(c) => (c.directory.clone(), c.name.clone(), c.session_id.clone()),
+            None => return,
+        };
+
+        match OpenCodeAdapter::restart(&dir, &name, session_id.as_deref()).await {
+            Ok((new_adapter, window_index, new_port)) => {
+                let new_pane = format!("stable:{}.0", window_index);
+
+                // Update persisted config.
+                if let Some(c) = self.config.agents.get_mut(idx) {
+                    c.pane = new_pane.clone();
+                    c.port = new_port;
+                }
+                let _ = self.config.save();
+
+                // Update in-memory agent entry.
+                if let Some(entry) = self.agents.get_mut(idx) {
+                    entry.config.pane = new_pane;
+                    entry.config.port = new_port;
+                    entry.meta.status = AgentStatus::Unknown;
+                }
+
+                // Swap in the new adapter (drops + aborts the old SSE task).
+                if idx < self.adapters.len() {
+                    self.adapters[idx] = Box::new(new_adapter);
+                }
+            }
+            Err(_) => {
+                // Restart failed — leave state as-is (agent stays Stopped).
             }
         }
     }

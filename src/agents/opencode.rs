@@ -67,6 +67,53 @@ const RECENT_LIMIT: usize = 50;
 const PART_DEBOUNCE: Duration = Duration::from_millis(200);
 
 // ---------------------------------------------------------------------------
+// Internal launch helper
+// ---------------------------------------------------------------------------
+
+/// Creates a new tmux window, sends the `opencode` command into it, and
+/// waits for the health endpoint to respond.  Returns `(window_index, pane)`.
+///
+/// If `session_id` is `Some` the command includes `--session <id>` so
+/// opencode resumes an existing session rather than starting a fresh one.
+async fn launch(
+    dir: &str,
+    name: &str,
+    port: u16,
+    session_id: Option<&str>,
+) -> anyhow::Result<(usize, String)> {
+    let window_index = tmux::new_window(dir, name)?;
+    let pane = format!("stable:{}.0", window_index);
+
+    let cmd = match session_id {
+        Some(sid) => format!("opencode --port {} --session {}\n", port, sid),
+        None => format!("opencode --port {}\n", port),
+    };
+    tmux::send_keys(&pane, &cmd)?;
+
+    let client = Client::new();
+    let health_url = format!("http://127.0.0.1:{}/global/health", port);
+
+    let mut healthy = false;
+    for _ in 0..25 {
+        sleep(tokio::time::Duration::from_millis(200)).await;
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if let Ok(body) = resp.json::<Value>().await {
+                if body.get("healthy").and_then(Value::as_bool).unwrap_or(false) {
+                    healthy = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if !healthy {
+        return Err(anyhow!("opencode did not become healthy within timeout"));
+    }
+
+    Ok((window_index, pane))
+}
+
+// ---------------------------------------------------------------------------
 // OpenCodeAdapter
 // ---------------------------------------------------------------------------
 
@@ -114,36 +161,27 @@ impl OpenCodeAdapter {
     /// opencode, waits for health.  Returns (adapter, window_index).
     pub async fn create(dir: &str, name: &str) -> anyhow::Result<(OpenCodeAdapter, usize)> {
         let port = find_free_port(14100);
-        let window_index = tmux::new_window(dir, name)?;
-        let pane = format!("stable:{}.0", window_index);
-        tmux::send_keys(&pane, &format!("opencode --port {}\n", port))?;
-
-        let client = Client::new();
-        let health_url = format!("http://127.0.0.1:{}/global/health", port);
-
-        let mut healthy = false;
-        for _ in 0..25 {
-            sleep(tokio::time::Duration::from_millis(200)).await;
-            if let Ok(resp) = client.get(&health_url).send().await {
-                if let Ok(body) = resp.json::<Value>().await {
-                    if body.get("healthy")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        healthy = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !healthy {
-            return Err(anyhow!("opencode did not become healthy within timeout"));
-        }
-
-        // new() spawns the SSE task internally.
+        let (window_index, _) = launch(dir, name, port, None).await?;
         let adapter = OpenCodeAdapter::new(port, None);
         Ok((adapter, window_index))
+    }
+
+    /// Restarts a stopped agent: scans for a free port, opens a new tmux window,
+    /// launches opencode resuming the previous session (via `--session <id>`),
+    /// and waits for health.  Returns (adapter, window_index, new_port).
+    ///
+    /// The caller is responsible for updating `AgentConfig.pane` and
+    /// `AgentConfig.port` with the returned values and saving the config.
+    pub async fn restart(
+        dir: &str,
+        name: &str,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<(OpenCodeAdapter, usize, u16)> {
+        let port = find_free_port(14100);
+        let (window_index, _) = launch(dir, name, port, session_id).await?;
+        // Preserve the existing session_id so continuity is maintained.
+        let adapter = OpenCodeAdapter::new(port, session_id.map(str::to_string));
+        Ok((adapter, window_index, port))
     }
 }
 

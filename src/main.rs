@@ -29,7 +29,36 @@ async fn main() -> Result<()> {
     tmux::ensure_session()?;
 
     // Load persisted config
-    let config = Config::load()?;
+    let mut config = Config::load()?;
+
+    // Auto-resume any agents whose tmux pane died (e.g. after a tmux server
+    // restart).  For each dead pane we open a new tmux window and relaunch
+    // opencode with `--session <id>` so the existing session is preserved.
+    let mut config_dirty = false;
+    for agent_config in config.agents.iter_mut() {
+        if !tmux::is_alive(&agent_config.pane) {
+            match OpenCodeAdapter::restart(
+                &agent_config.directory,
+                &agent_config.name,
+                agent_config.session_id.as_deref(),
+            )
+            .await
+            {
+                Ok((_adapter, window_index, new_port)) => {
+                    agent_config.pane = format!("stable:{}.0", window_index);
+                    agent_config.port = new_port;
+                    config_dirty = true;
+                }
+                Err(_) => {
+                    // Could not restart this agent — leave config unchanged so
+                    // the user can manually restart or remove it from the UI.
+                }
+            }
+        }
+    }
+    if config_dirty {
+        let _ = config.save();
+    }
 
     // Reconstruct agents and adapters from stored config
     let mut agents: Vec<AgentEntry> = Vec::new();

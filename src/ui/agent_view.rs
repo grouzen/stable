@@ -146,8 +146,8 @@ pub fn render_agent_view(
 }
 
 fn render_stopped_overlay(f: &mut Frame, area: Rect) {
-    // Compute a centered box: 46 wide, 6 tall
-    let overlay_width = 46u16.min(area.width);
+    // Compute a centered box: 58 wide, 6 tall
+    let overlay_width = 58u16.min(area.width);
     let overlay_height = 6u16.min(area.height);
     let x = area.x + area.width.saturating_sub(overlay_width) / 2;
     let y = area.y + area.height.saturating_sub(overlay_height) / 2;
@@ -168,8 +168,10 @@ fn render_stopped_overlay(f: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(vec![
+            Span::styled("[r]", Style::default().fg(Color::Yellow)),
+            Span::raw(" Restart   "),
             Span::styled("[d]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Remove agent   "),
+            Span::raw(" Remove   "),
             Span::styled("[Ctrl-g]", Style::default().fg(Color::Yellow)),
             Span::raw(" Dashboard"),
         ]),
