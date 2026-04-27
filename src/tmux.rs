@@ -2,9 +2,22 @@ use anyhow::{Context, Result};
 use crossterm::terminal;
 use regex::Regex;
 use std::process::Command;
+use std::sync::OnceLock;
 use tmux_interface::{NewWindow, SendKeys, Tmux};
 
-const SESSION: &str = "stable";
+static SESSION: OnceLock<String> = OnceLock::new();
+
+/// Initialise the tmux session name.  Must be called once before any other
+/// tmux function.  Subsequent calls are silently ignored (OnceLock semantics).
+pub fn init(name: &str) {
+    let _ = SESSION.set(name.to_string());
+}
+
+/// Returns the active tmux session name.  Falls back to `"stable"` if
+/// `init()` was never called.
+pub fn session_name() -> &'static str {
+    SESSION.get().map(String::as_str).unwrap_or("stable")
+}
 
 /// Replace non-`[a-zA-Z0-9_-]` chars with `-`, collapse consecutive dashes, trim edges.
 pub fn sanitize_name(s: &str) -> String {
@@ -26,12 +39,12 @@ pub fn sanitize_name(s: &str) -> String {
         .to_string()
 }
 
-/// Ensure the `stable` tmux session exists; create it detached if not.
+/// Ensure the tmux session exists; create it detached if not.
 /// Uses raw `Command` so that a tmux server is started automatically when
 /// none is running (tmux_interface's `HasSession` errors out in that case).
 pub fn ensure_session() -> Result<()> {
     let has = Command::new("tmux")
-        .args(["has-session", "-t", SESSION])
+        .args(["has-session", "-t", session_name()])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -45,7 +58,7 @@ pub fn ensure_session() -> Result<()> {
                 "new-session",
                 "-d",
                 "-s",
-                SESSION,
+                session_name(),
                 "-x",
                 &cols.to_string(),
                 "-y",
@@ -58,13 +71,13 @@ pub fn ensure_session() -> Result<()> {
     Ok(())
 }
 
-/// Create a new window in the `stable` session with the given working directory and name.
+/// Create a new window in the current session with the given working directory and name.
 /// Returns the window index (parsed from `#{window_index}` format output).
 pub fn new_window(dir: &str, name: &str) -> Result<usize> {
     let output = Tmux::with_command(
         NewWindow::new()
             .detached()
-            .target_window(SESSION)
+            .target_window(session_name())
             .start_directory(dir)
             .window_name(name)
             .print()
@@ -83,7 +96,7 @@ pub fn new_window(dir: &str, name: &str) -> Result<usize> {
     Ok(index)
 }
 
-/// Send keys to a tmux pane target (e.g. `stable:1.0`).
+/// Send keys to a tmux pane target (e.g. `mysession:1.0`).
 pub fn send_keys(target: &str, keys: &str) -> Result<()> {
     Tmux::with_command(SendKeys::new().target_pane(target).key(keys).build())
         .status()
@@ -174,11 +187,15 @@ pub fn pane_mouse_active(target: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Check whether a pane is alive by querying its pid.
+/// Check whether a pane is alive.
+///
+/// Uses `tmux list-panes -t <target>` which exits non-zero (and produces no
+/// output) when the exact window/pane does not exist, unlike `display-message`
+/// which silently falls back to the active pane in the session.
 pub fn is_alive(target: &str) -> bool {
     Command::new("tmux")
-        .args(["display-message", "-t", target, "-p", "#{pane_pid}"])
+        .args(["list-panes", "-t", target])
         .output()
-        .map(|o| !o.stdout.trim_ascii().is_empty())
+        .map(|o| o.status.success())
         .unwrap_or(false)
 }

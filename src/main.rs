@@ -18,18 +18,54 @@ use models::{AgentEntry, AgentMeta, AgentStatus};
 /// stable — multi-agent TUI dashboard
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Cli {}
+struct Cli {
+    /// Name of the tmux session to use
+    #[arg(long, default_value = "stable")]
+    tmux_session: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Parse CLI (no subcommands for MVP — just launch the TUI)
-    let _cli = Cli::parse();
+    // Parse CLI
+    let cli = Cli::parse();
 
-    // Ensure the stable tmux session exists (starts the server if needed)
+    // Initialise the tmux session name before any tmux operations.
+    tmux::init(&cli.tmux_session);
+
+    // Ensure the tmux session exists (starts the server if needed)
     tmux::ensure_session()?;
 
-    // Load persisted config
-    let config = Config::load()?;
+    // Load persisted config for this session
+    let mut config = Config::load(&cli.tmux_session)?;
+
+    // Auto-resume any agents whose tmux pane died (e.g. after a tmux server
+    // restart).  For each dead pane we open a new tmux window and relaunch
+    // opencode with `--session <id>` so the existing session is preserved.
+    let mut config_dirty = false;
+    for agent_config in config.agents.iter_mut() {
+        if !tmux::is_alive(&agent_config.pane) {
+            match OpenCodeAdapter::restart(
+                &agent_config.directory,
+                &agent_config.name,
+                agent_config.session_id.as_deref(),
+            )
+            .await
+            {
+                Ok((_adapter, window_index, new_port)) => {
+                    agent_config.pane = format!("{}:{}.0", tmux::session_name(), window_index);
+                    agent_config.port = new_port;
+                    config_dirty = true;
+                }
+                Err(_) => {
+                    // Could not restart this agent — leave config unchanged so
+                    // the user can manually restart or remove it from the UI.
+                }
+            }
+        }
+    }
+    if config_dirty {
+        let _ = config.save();
+    }
 
     // Reconstruct agents and adapters from stored config
     let mut agents: Vec<AgentEntry> = Vec::new();
