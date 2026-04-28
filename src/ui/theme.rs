@@ -8,6 +8,7 @@ use ratatui::style::Color;
 // ---------------------------------------------------------------------------
 
 /// Main background — darkest surface.
+#[allow(dead_code)]
 pub const BG: Color = Color::Rgb(40, 40, 40);
 /// Elevated surface — card inner zones, subtle zone tints.
 pub const BG1: Color = Color::Rgb(60, 56, 54);

@@ -28,6 +28,19 @@ fn count_waiting(agents: &[AgentEntry]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Style helper
+// ---------------------------------------------------------------------------
+
+/// Returns a base `Style` with `DIM` applied when `dimmed` is true.
+fn ds(dimmed: bool) -> Style {
+    if dimmed {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -39,6 +52,7 @@ pub fn render_dashboard(
     card_scroll: &[u16],
     card_response_heights: &mut Vec<u16>,
     card_response_widths: &mut Vec<u16>,
+    dimmed: bool,
 ) {
     // Split into main area and keybindings bar at bottom
     let chunks = Layout::default()
@@ -49,7 +63,7 @@ pub fn render_dashboard(
     let main_area = chunks[0];
     let bar_area = chunks[1];
 
-    render_keybindings_bar(f, bar_area, agents);
+    render_keybindings_bar(f, bar_area, agents, dimmed);
     render_grid(
         f,
         main_area,
@@ -58,6 +72,7 @@ pub fn render_dashboard(
         card_scroll,
         card_response_heights,
         card_response_widths,
+        dimmed,
     );
 }
 
@@ -98,6 +113,7 @@ fn render_grid(
     card_scroll: &[u16],
     card_response_heights: &mut Vec<u16>,
     card_response_widths: &mut Vec<u16>,
+    dimmed: bool,
 ) {
     if agents.is_empty() {
         let chunks = Layout::default()
@@ -109,7 +125,7 @@ fn render_grid(
             ])
             .split(area);
         let msg = Paragraph::new("No agents. Press [n] to create one.")
-            .style(Style::default().fg(GRAY))
+            .style(ds(dimmed).fg(GRAY))
             .alignment(Alignment::Center);
         f.render_widget(msg, chunks[1]);
         return;
@@ -149,8 +165,14 @@ fn render_grid(
 
             if slot < agents.len() {
                 let scroll = card_scroll.get(slot).copied().unwrap_or(0);
-                let (resp_h, resp_w) =
-                    render_card(f, cell_area, &agents[slot], slot == selected, scroll);
+                let (resp_h, resp_w) = render_card(
+                    f,
+                    cell_area,
+                    &agents[slot],
+                    slot == selected,
+                    scroll,
+                    dimmed,
+                );
                 card_response_heights[slot] = resp_h;
                 card_response_widths[slot] = resp_w;
             }
@@ -200,14 +222,13 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
-/// Truncates a string to `max` chars, appending `…` if needed.
+/// Truncates a string to `max` chars (hard cut, no ellipsis).
 fn truncate(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max {
         s.to_string()
     } else {
-        let t: String = chars[..max.saturating_sub(1)].iter().collect();
-        format!("{}…", t)
+        chars[..max].iter().collect()
     }
 }
 
@@ -249,20 +270,17 @@ fn render_card(
     entry: &AgentEntry,
     is_selected: bool,
     response_scroll: u16,
+    dimmed: bool,
 ) -> (u16, u16) {
     let (border_color, title_color) = if is_selected { (BLUE, BLUE) } else { (BG2, FG) };
 
     let border_style = if is_selected {
-        Style::default()
-            .fg(border_color)
-            .add_modifier(Modifier::BOLD)
+        ds(dimmed).fg(border_color).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(border_color)
+        ds(dimmed).fg(border_color)
     };
 
-    let title_style = Style::default()
-        .fg(title_color)
-        .add_modifier(Modifier::BOLD);
+    let title_style = ds(dimmed).fg(title_color).add_modifier(Modifier::BOLD);
 
     let block = Block::default()
         .title(Span::styled(
@@ -324,14 +342,11 @@ fn render_card(
     let avail = inner.width as usize;
     let padding = avail.saturating_sub(left_text.chars().count() + badge.chars().count());
     let row0 = Line::from(vec![
-        Span::styled(left_text, Style::default().fg(GRAY)),
+        Span::styled(left_text, ds(dimmed).fg(GRAY)),
         Span::raw(" ".repeat(padding)),
-        Span::styled("[ ", Style::default().fg(BG2)),
-        Span::styled(
-            badge_inner,
-            Style::default().fg(col).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ]", Style::default().fg(BG2)),
+        Span::styled("[ ", ds(dimmed).fg(BG2)),
+        Span::styled(badge_inner, ds(dimmed).fg(col).add_modifier(Modifier::BOLD)),
+        Span::styled(" ]", ds(dimmed).fg(BG2)),
     ]);
 
     // Rows 1 & 2: prompts — single line, truncated, ">" prefix
@@ -351,19 +366,19 @@ fn render_card(
     // --- Info row A: directory ---
     let dir_str = shellify_dir(&entry.config.directory);
     let info_a = Line::from(vec![
-        Span::styled(format!("{} ", ICON_DIR), Style::default().fg(GRAY)),
-        Span::styled(dir_str, Style::default().fg(GRAY)),
+        Span::styled(format!("{} ", ICON_DIR), ds(dimmed).fg(GRAY)),
+        Span::styled(dir_str, ds(dimmed).fg(GRAY)),
     ]);
 
     // --- Info row B: agent_type · model_name ---
     let agent_type = &entry.config.agent_type;
     let model_str = entry.meta.model_name.as_deref().unwrap_or("—");
     let info_b = Line::from(vec![
-        Span::styled(format!("{} ", ICON_AGENT), Style::default().fg(GRAY)),
-        Span::styled(agent_type.as_str(), Style::default().fg(GRAY)),
-        Span::styled("  ", Style::default().fg(GRAY)),
-        Span::styled(format!("{} ", ICON_MODEL), Style::default().fg(GRAY)),
-        Span::styled(model_str, Style::default().fg(GRAY)),
+        Span::styled(format!("{} ", ICON_AGENT), ds(dimmed).fg(GRAY)),
+        Span::styled(agent_type.as_str(), ds(dimmed).fg(GRAY)),
+        Span::styled("  ", ds(dimmed).fg(GRAY)),
+        Span::styled(format!("{} ", ICON_MODEL), ds(dimmed).fg(GRAY)),
+        Span::styled(model_str, ds(dimmed).fg(GRAY)),
     ]);
 
     let info_row_h: u16 = 1;
@@ -423,22 +438,18 @@ fn render_card(
         let prompt_block = Block::default()
             .borders(Borders::LEFT)
             .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(YELLOW))
-            .style(Style::default().bg(BG1));
+            .border_style(ds(dimmed).fg(YELLOW))
+            .style(ds(dimmed).bg(BG1));
         let text_inner = prompt_block.inner(text_area);
         f.render_widget(prompt_block, text_area);
 
         // Truncate to inner width (left border consumed 1 char)
         let usable = text_inner.width as usize;
         let content = if text.is_empty() {
-            Paragraph::new(Span::styled("—", Style::default().fg(GRAY)))
-                .style(Style::default().bg(BG1))
+            Paragraph::new(Span::styled("—", ds(dimmed).fg(GRAY))).style(ds(dimmed).bg(BG1))
         } else {
-            Paragraph::new(Span::styled(
-                truncate(text, usable),
-                Style::default().fg(FG),
-            ))
-            .style(Style::default().bg(BG1))
+            Paragraph::new(Span::styled(truncate(text, usable), ds(dimmed).fg(FG)))
+                .style(ds(dimmed).bg(BG1))
         };
         f.render_widget(content, text_inner);
     };
@@ -497,7 +508,7 @@ fn render_card(
         .take(resp_area.width as usize)
         .collect();
     f.render_widget(
-        Paragraph::new(divider).style(Style::default().fg(divider_color)),
+        Paragraph::new(divider).style(ds(dimmed).fg(divider_color)),
         divider_area,
     );
 
@@ -514,13 +525,13 @@ fn render_card(
             // Scroll hint on selected card
             if is_selected && scroll_offset > 0 {
                 let hint = Paragraph::new("▲ PgUp")
-                    .style(Style::default().fg(GRAY))
+                    .style(ds(dimmed).fg(GRAY))
                     .alignment(Alignment::Right);
                 f.render_widget(hint, divider_area);
             }
         }
         _ => {
-            let placeholder = Paragraph::new("no response yet").style(Style::default().fg(GRAY));
+            let placeholder = Paragraph::new("no response yet").style(ds(dimmed).fg(GRAY));
             f.render_widget(placeholder, content_area);
         }
     }
@@ -533,41 +544,41 @@ fn render_card(
 // ---------------------------------------------------------------------------
 
 /// Renders a styled `[key]` + ` action` pair as spans into the given vec.
-fn push_keybind<'a>(spans: &mut Vec<Span<'a>>, key: &'a str, action: &'a str) {
-    spans.push(Span::styled("[", Style::default().fg(BG2)));
-    spans.push(Span::styled(key, Style::default().fg(ORANGE)));
-    spans.push(Span::styled("]", Style::default().fg(BG2)));
-    spans.push(Span::styled(action, Style::default().fg(GRAY)));
+fn push_keybind<'a>(spans: &mut Vec<Span<'a>>, key: &'a str, action: &'a str, dimmed: bool) {
+    spans.push(Span::styled("[", ds(dimmed).fg(BG2)));
+    spans.push(Span::styled(key, ds(dimmed).fg(ORANGE)));
+    spans.push(Span::styled("]", ds(dimmed).fg(BG2)));
+    spans.push(Span::styled(action, ds(dimmed).fg(GRAY)));
 }
 
-fn render_keybindings_bar(f: &mut Frame, area: Rect, agents: &[AgentEntry]) {
+fn render_keybindings_bar(f: &mut Frame, area: Rect, agents: &[AgentEntry], dimmed: bool) {
     let running = count_running(agents);
     let waiting = count_waiting(agents);
 
     let mut spans: Vec<Span> = Vec::new();
 
-    push_keybind(&mut spans, "n", " New");
+    push_keybind(&mut spans, "n", " New", dimmed);
     spans.push(Span::raw("  "));
-    push_keybind(&mut spans, "d", " Del");
+    push_keybind(&mut spans, "d", " Del", dimmed);
     spans.push(Span::raw("  "));
-    push_keybind(&mut spans, "Enter", " Open");
+    push_keybind(&mut spans, "Enter", " Open", dimmed);
     spans.push(Span::raw("  "));
-    push_keybind(&mut spans, "←↓↑→", " Navigate");
+    push_keybind(&mut spans, "←↓↑→", " Navigate", dimmed);
     spans.push(Span::raw("  "));
-    push_keybind(&mut spans, "Ctrl+←↓↑→", " Move");
+    push_keybind(&mut spans, "Ctrl+←↓↑→", " Move", dimmed);
     spans.push(Span::raw("  "));
-    push_keybind(&mut spans, "PgUp/Dn", " Scroll");
+    push_keybind(&mut spans, "PgUp/Dn", " Scroll", dimmed);
     spans.push(Span::raw("  "));
-    push_keybind(&mut spans, "q", " Quit");
+    push_keybind(&mut spans, "q", " Quit", dimmed);
 
     // Status counts
     spans.push(Span::styled(
         format!("    {} {} running", ICON_RUN, running),
-        Style::default().fg(GREEN),
+        ds(dimmed).fg(GREEN),
     ));
     spans.push(Span::styled(
         format!("  {} {} waiting", ICON_WAIT, waiting),
-        Style::default().fg(YELLOW),
+        ds(dimmed).fg(YELLOW),
     ));
 
     let status_line = Line::from(spans);
@@ -581,7 +592,7 @@ fn render_keybindings_bar(f: &mut Frame, area: Rect, agents: &[AgentEntry]) {
 
     f.render_widget(Paragraph::new(status_line), bar_chunks[0]);
     f.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(GRAY)),
+        Paragraph::new(hint).style(ds(dimmed).fg(GRAY)),
         bar_chunks[1],
     );
 }
