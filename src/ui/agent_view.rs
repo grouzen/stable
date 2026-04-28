@@ -1,15 +1,16 @@
 use ansi_to_tui::IntoText;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame,
 };
 use std::collections::HashMap;
 
 use crate::app::AgentViewState;
 use crate::models::{AgentEntry, AgentStatus};
+use crate::ui::theme::*;
 
 pub fn render_agent_view(
     f: &mut Frame,
@@ -52,7 +53,7 @@ pub fn render_agent_view(
     // avoiding transient per-character highlights (e.g. vim's MatchParen on
     // bracket characters) from hijacking the whole-pane background.
     let base_bg = {
-        let mut freq: HashMap<Color, usize> = HashMap::new();
+        let mut freq: HashMap<ratatui::style::Color, usize> = HashMap::new();
         for span in text.lines.iter().flat_map(|l| l.spans.iter()) {
             if let Some(bg) = span.style.bg {
                 *freq.entry(bg).or_insert(0) += span.content.len();
@@ -97,13 +98,7 @@ pub fn render_agent_view(
         "--:--:--".to_string()
     };
 
-    let status_text = format!(
-        " {} | {} | {} | last refresh {}",
-        agent_entry.config.name,
-        agent_entry.config.directory,
-        agent_entry.config.agent_type,
-        refresh_str
-    );
+    let dir_str = &agent_entry.config.directory;
 
     let running = agents
         .iter()
@@ -114,15 +109,33 @@ pub fn render_agent_view(
         .filter(|a| matches!(a.meta.status, AgentStatus::WaitingForInput))
         .count();
 
+    let sep = Span::styled(" │ ", Style::default().fg(BG2));
     let status_line = Line::from(vec![
-        Span::styled(status_text, Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("  ● {} running", running),
-            Style::default().fg(Color::Green),
+            format!(" {}", agent_entry.config.name),
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+        ),
+        sep.clone(),
+        Span::styled(format!("{} ", ICON_DIR), Style::default().fg(GRAY)),
+        Span::styled(dir_str.as_str(), Style::default().fg(GRAY)),
+        sep.clone(),
+        Span::styled(format!("{} ", ICON_AGENT), Style::default().fg(GRAY)),
+        Span::styled(
+            agent_entry.config.agent_type.as_str(),
+            Style::default().fg(GRAY),
+        ),
+        sep.clone(),
+        Span::styled(
+            format!("{} {}", ICON_TIME, refresh_str),
+            Style::default().fg(GRAY),
         ),
         Span::styled(
-            format!("  ⏸ {} waiting", waiting),
-            Style::default().fg(Color::Yellow),
+            format!("    {} {} running", ICON_RUN, running),
+            Style::default().fg(GREEN),
+        ),
+        Span::styled(
+            format!("  {} {} waiting", ICON_WAIT, waiting),
+            Style::default().fg(YELLOW),
         ),
     ]);
 
@@ -133,11 +146,11 @@ pub fn render_agent_view(
         .constraints([Constraint::Min(0), Constraint::Length(hint_width)])
         .split(status_area);
 
-    let status_bar = Paragraph::new(status_line);
-    f.render_widget(status_bar, status_chunks[0]);
-
-    let hint_bar = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
-    f.render_widget(hint_bar, status_chunks[1]);
+    f.render_widget(Paragraph::new(status_line), status_chunks[0]);
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(GRAY)),
+        status_chunks[1],
+    );
 
     // Stopped overlay
     if state.show_stopped_overlay {
@@ -146,16 +159,23 @@ pub fn render_agent_view(
 }
 
 fn render_stopped_overlay(f: &mut Frame, area: Rect) {
-    // Compute a centered box: 58 wide, 6 tall
+    // Compute a centered box: 58 wide, 7 tall
     let overlay_width = 58u16.min(area.width);
-    let overlay_height = 6u16.min(area.height);
+    let overlay_height = 7u16.min(area.height);
     let x = area.x + area.width.saturating_sub(overlay_width) / 2;
     let y = area.y + area.height.saturating_sub(overlay_height) / 2;
     let overlay_area = Rect::new(x, y, overlay_width, overlay_height);
 
     f.render_widget(Clear, overlay_area);
 
-    let block = Block::default().borders(Borders::ALL);
+    let block = Block::default()
+        .title(Span::styled(
+            " Agent Stopped ",
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(RED));
     let inner = block.inner(overlay_area);
     f.render_widget(block, overlay_area);
 
@@ -163,17 +183,25 @@ fn render_stopped_overlay(f: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "Agent stopped.",
-            Style::default().add_modifier(Modifier::BOLD),
+            "The agent process has exited.",
+            Style::default().fg(GRAY),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("[r]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Restart   "),
-            Span::styled("[d]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Remove   "),
-            Span::styled("[Ctrl-g]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Dashboard"),
+            Span::styled("[", Style::default().fg(BG2)),
+            Span::styled("r", Style::default().fg(ORANGE)),
+            Span::styled("]", Style::default().fg(BG2)),
+            Span::styled(" Restart", Style::default().fg(FG)),
+            Span::raw("   "),
+            Span::styled("[", Style::default().fg(BG2)),
+            Span::styled("d", Style::default().fg(ORANGE)),
+            Span::styled("]", Style::default().fg(BG2)),
+            Span::styled(" Remove", Style::default().fg(FG)),
+            Span::raw("   "),
+            Span::styled("[", Style::default().fg(BG2)),
+            Span::styled("Ctrl-g", Style::default().fg(ORANGE)),
+            Span::styled("]", Style::default().fg(BG2)),
+            Span::styled(" Dashboard", Style::default().fg(FG)),
         ]),
     ];
 

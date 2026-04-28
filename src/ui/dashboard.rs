@@ -1,12 +1,13 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
 
 use crate::models::{AgentEntry, AgentStatus};
+use crate::ui::theme::*;
 
 // ---------------------------------------------------------------------------
 // Status count helpers (used by keybindings bar)
@@ -108,7 +109,7 @@ fn render_grid(
             ])
             .split(area);
         let msg = Paragraph::new("No agents. Press [n] to create one.")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(GRAY))
             .alignment(Alignment::Center);
         f.render_widget(msg, chunks[1]);
         return;
@@ -164,9 +165,9 @@ fn render_grid(
 
 fn status_symbol(status: &AgentStatus) -> &'static str {
     match status {
-        AgentStatus::Running => "●",
-        AgentStatus::WaitingForInput => "⏸",
-        AgentStatus::Stopped => "■",
+        AgentStatus::Running => ICON_RUN,
+        AgentStatus::WaitingForInput => ICON_WAIT,
+        AgentStatus::Stopped => ICON_STOP,
         AgentStatus::Unknown => "?",
     }
 }
@@ -180,12 +181,12 @@ fn status_label(status: &AgentStatus) -> &'static str {
     }
 }
 
-fn status_color(status: &AgentStatus) -> Color {
+fn status_color(status: &AgentStatus) -> ratatui::style::Color {
     match status {
-        AgentStatus::Running => Color::Green,
-        AgentStatus::WaitingForInput => Color::Yellow,
-        AgentStatus::Stopped => Color::Red,
-        AgentStatus::Unknown => Color::DarkGray,
+        AgentStatus::Running => GREEN,
+        AgentStatus::WaitingForInput => YELLOW,
+        AgentStatus::Stopped => RED,
+        AgentStatus::Unknown => GRAY,
     }
 }
 
@@ -249,22 +250,27 @@ fn render_card(
     is_selected: bool,
     response_scroll: u16,
 ) -> (u16, u16) {
+    let (border_color, title_color) = if is_selected { (BLUE, BLUE) } else { (BG2, FG) };
+
     let border_style = if is_selected {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(border_color)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
+        Style::default().fg(border_color)
     };
 
+    let title_style = Style::default()
+        .fg(title_color)
+        .add_modifier(Modifier::BOLD);
+
     let block = Block::default()
-        .title(format!(" {} ", entry.config.name))
+        .title(Span::styled(
+            format!(" {} ", entry.config.name),
+            title_style,
+        ))
         .borders(Borders::ALL)
-        .border_type(if is_selected {
-            BorderType::Double
-        } else {
-            BorderType::Plain
-        })
+        .border_type(BorderType::Rounded)
         .border_style(border_style);
 
     // Apply 1-cell left/right inner padding
@@ -285,7 +291,7 @@ fn render_card(
     // Compute header content
     // -----------------------------------------------------------------------
 
-    // Row 0: ctx + work time (left) + status (right) — always height 3
+    // Row 0: ctx + work time (left) + status badge (right) — always height 2
     let sym = status_symbol(&entry.meta.status);
     let lbl = status_label(&entry.meta.status);
     let col = status_color(&entry.meta.status);
@@ -302,18 +308,30 @@ fn render_card(
     };
 
     let work_text = if entry.meta.total_work_ms > 0 {
-        format!(" ⏱ {}", format_uptime(entry.meta.total_work_ms))
+        format!(
+            "  {} {}",
+            ICON_TIME,
+            format_uptime(entry.meta.total_work_ms)
+        )
     } else {
         String::new()
     };
     let left_text = format!("{}{}", ctx_text, work_text);
 
-    let status_str = format!("{} {}", sym, lbl);
+    // Status badge: "[ ● Running ]"
+    let badge_inner = format!("{} {}", sym, lbl);
+    let badge = format!("[ {} ]", badge_inner);
     let avail = inner.width as usize;
-    let padding = avail.saturating_sub(left_text.chars().count() + status_str.len());
+    let padding = avail.saturating_sub(left_text.chars().count() + badge.chars().count());
     let row0 = Line::from(vec![
-        Span::raw(format!("{}{}", left_text, " ".repeat(padding))),
-        Span::styled(status_str, Style::default().fg(col)),
+        Span::styled(left_text, Style::default().fg(GRAY)),
+        Span::raw(" ".repeat(padding)),
+        Span::styled("[ ", Style::default().fg(BG2)),
+        Span::styled(
+            badge_inner,
+            Style::default().fg(col).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ]", Style::default().fg(BG2)),
     ]);
 
     // Rows 1 & 2: prompts — single line, truncated, ">" prefix
@@ -332,18 +350,20 @@ fn render_card(
 
     // --- Info row A: directory ---
     let dir_str = shellify_dir(&entry.config.directory);
-    let info_a = Line::from(vec![Span::styled(
-        dir_str,
-        Style::default().fg(Color::DarkGray),
-    )]);
+    let info_a = Line::from(vec![
+        Span::styled(format!("{} ", ICON_DIR), Style::default().fg(GRAY)),
+        Span::styled(dir_str, Style::default().fg(GRAY)),
+    ]);
 
     // --- Info row B: agent_type · model_name ---
     let agent_type = &entry.config.agent_type;
     let model_str = entry.meta.model_name.as_deref().unwrap_or("—");
     let info_b = Line::from(vec![
-        Span::styled(agent_type.as_str(), Style::default().fg(Color::DarkGray)),
-        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-        Span::styled(model_str, Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{} ", ICON_AGENT), Style::default().fg(GRAY)),
+        Span::styled(agent_type.as_str(), Style::default().fg(GRAY)),
+        Span::styled("  ", Style::default().fg(GRAY)),
+        Span::styled(format!("{} ", ICON_MODEL), Style::default().fg(GRAY)),
+        Span::styled(model_str, Style::default().fg(GRAY)),
     ]);
 
     let info_row_h: u16 = 1;
@@ -399,23 +419,26 @@ fn render_card(
             .split(slot);
         let text_area = sub[0];
 
-        // Block: thick left border (Cyan) + dim background fill
+        // Block: thick left border (Yellow) + BG1 background fill
         let prompt_block = Block::default()
             .borders(Borders::LEFT)
             .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Rgb(20, 24, 30)));
+            .border_style(Style::default().fg(YELLOW))
+            .style(Style::default().bg(BG1));
         let text_inner = prompt_block.inner(text_area);
         f.render_widget(prompt_block, text_area);
 
         // Truncate to inner width (left border consumed 1 char)
         let usable = text_inner.width as usize;
         let content = if text.is_empty() {
-            Paragraph::new(Span::styled("—", Style::default().fg(Color::DarkGray)))
-                .style(Style::default().bg(Color::Rgb(20, 24, 30)))
+            Paragraph::new(Span::styled("—", Style::default().fg(GRAY)))
+                .style(Style::default().bg(BG1))
         } else {
-            Paragraph::new(Span::raw(truncate(text, usable)))
-                .style(Style::default().bg(Color::Rgb(20, 24, 30)))
+            Paragraph::new(Span::styled(
+                truncate(text, usable),
+                Style::default().fg(FG),
+            ))
+            .style(Style::default().bg(BG1))
         };
         f.render_widget(content, text_inner);
     };
@@ -468,16 +491,15 @@ fn render_card(
         resp_area
     };
 
-    // Draw divider
-    let divider_style = if is_selected {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    // Draw divider — matches selection state
+    let divider_color = if is_selected { BLUE } else { BG2 };
     let divider: String = std::iter::repeat('─')
         .take(resp_area.width as usize)
         .collect();
-    f.render_widget(Paragraph::new(divider).style(divider_style), divider_area);
+    f.render_widget(
+        Paragraph::new(divider).style(Style::default().fg(divider_color)),
+        divider_area,
+    );
 
     // Render response content
     match &entry.meta.last_model_response {
@@ -492,14 +514,13 @@ fn render_card(
             // Scroll hint on selected card
             if is_selected && scroll_offset > 0 {
                 let hint = Paragraph::new("▲ PgUp")
-                    .style(Style::default().fg(Color::DarkGray))
+                    .style(Style::default().fg(GRAY))
                     .alignment(Alignment::Right);
                 f.render_widget(hint, divider_area);
             }
         }
         _ => {
-            let placeholder =
-                Paragraph::new("no response yet").style(Style::default().fg(Color::DarkGray));
+            let placeholder = Paragraph::new("no response yet").style(Style::default().fg(GRAY));
             f.render_widget(placeholder, content_area);
         }
     }
@@ -511,24 +532,45 @@ fn render_card(
 // Keybindings bar
 // ---------------------------------------------------------------------------
 
+/// Renders a styled `[key]` + ` action` pair as spans into the given vec.
+fn push_keybind<'a>(spans: &mut Vec<Span<'a>>, key: &'a str, action: &'a str) {
+    spans.push(Span::styled("[", Style::default().fg(BG2)));
+    spans.push(Span::styled(key, Style::default().fg(ORANGE)));
+    spans.push(Span::styled("]", Style::default().fg(BG2)));
+    spans.push(Span::styled(action, Style::default().fg(GRAY)));
+}
+
 fn render_keybindings_bar(f: &mut Frame, area: Rect, agents: &[AgentEntry]) {
     let running = count_running(agents);
     let waiting = count_waiting(agents);
 
-    let hints = "[n] New  [d] Del  [Enter] Open  [←↓↑→/hjkl] Navigate  \
-                 [Ctrl+←↓↑→] Move card  [PgUp/Dn] Scroll  [q] Quit";
+    let mut spans: Vec<Span> = Vec::new();
 
-    let status_line = Line::from(vec![
-        Span::styled(hints, Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("  ● {} running", running),
-            Style::default().fg(Color::Green),
-        ),
-        Span::styled(
-            format!("  ⏸ {} waiting", waiting),
-            Style::default().fg(Color::Yellow),
-        ),
-    ]);
+    push_keybind(&mut spans, "n", " New");
+    spans.push(Span::raw("  "));
+    push_keybind(&mut spans, "d", " Del");
+    spans.push(Span::raw("  "));
+    push_keybind(&mut spans, "Enter", " Open");
+    spans.push(Span::raw("  "));
+    push_keybind(&mut spans, "←↓↑→", " Navigate");
+    spans.push(Span::raw("  "));
+    push_keybind(&mut spans, "Ctrl+←↓↑→", " Move");
+    spans.push(Span::raw("  "));
+    push_keybind(&mut spans, "PgUp/Dn", " Scroll");
+    spans.push(Span::raw("  "));
+    push_keybind(&mut spans, "q", " Quit");
+
+    // Status counts
+    spans.push(Span::styled(
+        format!("    {} {} running", ICON_RUN, running),
+        Style::default().fg(GREEN),
+    ));
+    spans.push(Span::styled(
+        format!("  {} {} waiting", ICON_WAIT, waiting),
+        Style::default().fg(YELLOW),
+    ));
+
+    let status_line = Line::from(spans);
 
     let hint = " Shift+drag to select";
     let hint_width = hint.len() as u16;
@@ -539,7 +581,7 @@ fn render_keybindings_bar(f: &mut Frame, area: Rect, agents: &[AgentEntry]) {
 
     f.render_widget(Paragraph::new(status_line), bar_chunks[0]);
     f.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(hint).style(Style::default().fg(GRAY)),
         bar_chunks[1],
     );
 }
