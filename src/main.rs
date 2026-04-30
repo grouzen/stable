@@ -79,7 +79,6 @@ async fn main() -> Result<()> {
                 status: AgentStatus::Unknown,
                 context: None,
                 first_prompt: None,
-                last_prompt: None,
                 last_model_response: None,
                 model_name: None,
                 total_work_ms: 0,

@@ -760,15 +760,6 @@ impl AgentAdapter for OpenCodeAdapter {
         self.live_cache.read().unwrap().first_prompt.clone()
     }
 
-    async fn get_last_prompt(&self) -> Option<String> {
-        let messages = self.live_cache.read().unwrap().recent_messages.clone()?;
-        messages
-            .into_iter()
-            .filter(|m: &Value| msg_role(m) == Some("user"))
-            .last()
-            .and_then(|m| all_text_parts(&m))
-    }
-
     async fn get_last_model_response(&self) -> Option<String> {
         let mut messages = self.live_cache.read().unwrap().recent_messages.clone()?;
         // Sort oldest-first by creation timestamp so positional ordering is reliable.
