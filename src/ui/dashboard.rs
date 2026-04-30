@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Padding, Paragraph},
     Frame,
 };
 
@@ -339,18 +339,12 @@ fn render_card(
         Span::styled(" ]", ds(dimmed).fg(BG2)),
     ]);
 
-    // Rows 1 & 2: prompts — single line, truncated, ">" prefix
+    // First prompt only — single line, centered vertically with 1-cell top/bottom padding
     let fp_raw = entry.meta.first_prompt.as_deref().unwrap_or("");
-    let lp_raw = entry.meta.last_prompt.as_deref().unwrap_or("");
     let fp_text = first_line(fp_raw);
-    let lp_text = first_line(lp_raw);
 
-    // Hide last prompt if it equals the first (e.g. single-message agents)
-    let show_last = !lp_text.is_empty() && lp_text != fp_text;
-
-    let prompt_h: u16 = 2; // 1 text + 1 bottom margin
+    let prompt_h: u16 = 3; // top padding + text + bottom padding
     let row1_h = prompt_h;
-    let row2_h = if show_last { prompt_h } else { 0 };
     let row0_h: u16 = 2;
 
     // --- Info row A: directory ---
@@ -373,7 +367,7 @@ fn render_card(
 
     let info_row_h: u16 = 1;
     let info_row_b_h: u16 = 2; // 1 text + 1 empty margin line
-    let header_lines = row0_h + info_row_h + info_row_b_h + row1_h + row2_h;
+    let header_lines = row0_h + info_row_h + info_row_b_h + row1_h;
 
     // -----------------------------------------------------------------------
     // Layout: header + response block
@@ -408,32 +402,23 @@ fn render_card(
         f.render_widget(Paragraph::new(line), sub[0]);
     };
 
-    // Helper: render a single-line truncated prompt with a thick colored left
-    // border, dimmed background, and a bottom margin line.
-    let render_prompt = |f: &mut Frame, slot: Rect, text: &str, h: u16| {
-        if slot.height == 0 || h == 0 {
+    // Helper: render first prompt with thick yellow left border, BG1 fill,
+    // and padding(left=1, right=1, top=1, bottom=1) via Ratatui's Block API.
+    let render_prompt = |f: &mut Frame, slot: Rect, text: &str| {
+        if slot.height == 0 {
             return;
         }
-        // Split slot into text row + bottom margin
-        let sub = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(h.saturating_sub(1)),
-            ])
-            .split(slot);
-        let text_area = sub[0];
 
-        // Block: thick left border (Yellow) + BG1 background fill
+        // Block: thick left border (Yellow) + BG1 background fill + padding
         let prompt_block = Block::default()
             .borders(Borders::LEFT)
             .border_type(BorderType::Thick)
             .border_style(ds(dimmed).fg(YELLOW))
-            .style(ds(dimmed).bg(BG1));
-        let text_inner = prompt_block.inner(text_area);
-        f.render_widget(prompt_block, text_area);
+            .style(ds(dimmed).bg(BG1))
+            .padding(Padding::new(1, 1, 1, 1));
+        let text_inner = prompt_block.inner(slot);
+        f.render_widget(prompt_block, slot);
 
-        // Truncate to inner width (left border consumed 1 char)
         let usable = text_inner.width as usize;
         let content = if text.is_empty() {
             Paragraph::new(Span::styled("—", ds(dimmed).fg(GRAY))).style(ds(dimmed).bg(BG1))
@@ -445,15 +430,12 @@ fn render_card(
     };
 
     // Build header row areas
-    let mut constraints = vec![
+    let constraints = vec![
         Constraint::Length(row0_h),
         Constraint::Length(info_row_h),
         Constraint::Length(info_row_b_h),
         Constraint::Length(row1_h),
     ];
-    if show_last {
-        constraints.push(Constraint::Length(row2_h));
-    }
     let header_splits = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
@@ -462,10 +444,7 @@ fn render_card(
     render_centered(f, header_splits[0], row0, row0_h);
     f.render_widget(Paragraph::new(info_a), header_splits[1]);
     f.render_widget(Paragraph::new(info_b), header_splits[2]);
-    render_prompt(f, header_splits[3], fp_text, row1_h);
-    if show_last {
-        render_prompt(f, header_splits[4], lp_text, row2_h);
-    }
+    render_prompt(f, header_splits[3], fp_text);
 
     // -----------------------------------------------------------------------
     // Response block
