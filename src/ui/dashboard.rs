@@ -239,20 +239,6 @@ fn shellify_dir(dir: &str) -> String {
 
 /// Formats a millisecond duration into a human-readable string
 /// (e.g. "3h 12m", "45m", "< 1m").
-fn format_uptime(ms: u64) -> String {
-    let secs = ms / 1000;
-    let hours = secs / 3600;
-    let mins = (secs % 3600) / 60;
-    if hours > 0 {
-        format!("{}h {}m", hours, mins)
-    } else if mins > 0 {
-        format!("{}m", mins)
-    } else if secs > 0 {
-        format!("{}s", secs)
-    } else {
-        "< 1s".to_string()
-    }
-}
 
 fn render_card(
     f: &mut Frame,
@@ -361,7 +347,7 @@ fn render_card(
         Span::styled(agent_type.as_str(), ds(dimmed).fg(GRAY)),
     ];
     if let Some(model_str) = entry.meta.model_name.as_deref() {
-        info_b_spans.push(Span::styled("  ", ds(dimmed).fg(GRAY)));
+        info_b_spans.push(Span::styled(" ", ds(dimmed).fg(GRAY)));
         info_b_spans.push(Span::styled(
             format!("{} ", ICON_MODEL),
             ds(dimmed).fg(GRAY),
@@ -518,41 +504,38 @@ fn render_keybindings_bar(f: &mut Frame, area: Rect, agents: &[AgentEntry], dimm
     let mut spans: Vec<Span> = Vec::new();
 
     push_keybind(&mut spans, "n", " New", dimmed);
-    spans.push(Span::raw("  "));
+    spans.push(Span::raw(" "));
     push_keybind(&mut spans, "d", " Del", dimmed);
-    spans.push(Span::raw("  "));
+    spans.push(Span::raw(" "));
     push_keybind(&mut spans, "Enter", " Open", dimmed);
-    spans.push(Span::raw("  "));
+    spans.push(Span::raw(" "));
     push_keybind(&mut spans, "←↓↑→", " Navigate", dimmed);
-    spans.push(Span::raw("  "));
+    spans.push(Span::raw(" "));
     push_keybind(&mut spans, "Ctrl+←↓↑→", " Move", dimmed);
-    spans.push(Span::raw("  "));
+    spans.push(Span::raw(" "));
     push_keybind(&mut spans, "PgUp/Dn", " Scroll", dimmed);
-    spans.push(Span::raw("  "));
+    spans.push(Span::raw(" "));
     push_keybind(&mut spans, "q", " Quit", dimmed);
 
     // Status counts
+    spans.push(Span::styled(" │ ", ds(dimmed).fg(BG2)));
     spans.push(Span::styled(
-        format!("    {} {} running", ICON_RUN, running),
+        format!("{} {} running", ICON_RUN, running),
         ds(dimmed).fg(GREEN),
     ));
     spans.push(Span::styled(
-        format!("  {} {} waiting", ICON_WAIT, waiting),
+        format!(" {} {} waiting", ICON_WAIT, waiting),
         ds(dimmed).fg(YELLOW),
     ));
 
     let status_line = Line::from(spans);
 
-    let brand = format!("♥ Stable v{}  ", env!("CARGO_PKG_VERSION"));
-    let brand_width = brand.chars().count() as u16;
+    let (brand, brand_width) = brand_line(dimmed);
     let bar_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(brand_width)])
         .split(area);
 
     f.render_widget(Paragraph::new(status_line), bar_chunks[0]);
-    f.render_widget(
-        Paragraph::new(brand).style(ds(dimmed).fg(GRAY)),
-        bar_chunks[1],
-    );
+    f.render_widget(Paragraph::new(brand), bar_chunks[1]);
 }

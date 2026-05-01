@@ -84,20 +84,6 @@ pub fn render_agent_view(
     }
 
     // Status bar
-    let refresh_str = if let Some(sys_time) = state.last_refresh {
-        if let Ok(dur) = sys_time.duration_since(std::time::UNIX_EPOCH) {
-            let wall_secs = dur.as_secs();
-            let h = (wall_secs / 3600) % 24;
-            let m = (wall_secs / 60) % 60;
-            let s = wall_secs % 60;
-            format!("{:02}:{:02}:{:02}", h, m, s)
-        } else {
-            "??:??:??".to_string()
-        }
-    } else {
-        "--:--:--".to_string()
-    };
-
     let dir_str = &agent_entry.config.directory;
 
     let running = agents
@@ -122,6 +108,12 @@ pub fn render_agent_view(
         "∞/∞".to_string()
     };
 
+    let work_str = if agent_entry.meta.total_work_ms > 0 {
+        format_uptime(agent_entry.meta.total_work_ms)
+    } else {
+        "< 1s".to_string()
+    };
+
     let mut status_spans = vec![
         Span::styled(
             format!(" {}", agent_entry.config.name),
@@ -129,46 +121,39 @@ pub fn render_agent_view(
         ),
         sep.clone(),
         Span::styled(ctx_text, Style::default().fg(GRAY)),
+        Span::styled(
+            format!(" {} {}", ICON_TIME, work_str),
+            Style::default().fg(GRAY),
+        ),
         sep.clone(),
         Span::styled(format!("{} ", ICON_DIR), Style::default().fg(GRAY)),
         Span::styled(dir_str.as_str(), Style::default().fg(GRAY)),
-        sep.clone(),
-        Span::styled(format!("{} ", ICON_AGENT), Style::default().fg(GRAY)),
+        Span::styled(format!(" {} ", ICON_AGENT), Style::default().fg(GRAY)),
         Span::styled(
             agent_entry.config.agent_type.as_str(),
             Style::default().fg(GRAY),
         ),
-        sep.clone(),
-        Span::styled(
-            format!("{} {}", ICON_TIME, refresh_str),
-            Style::default().fg(GRAY),
-        ),
-        Span::styled(
-            format!("    {} {} running", ICON_RUN, running),
-            Style::default().fg(GREEN),
-        ),
-        Span::styled(
-            format!("  {} {} waiting", ICON_WAIT, waiting),
-            Style::default().fg(YELLOW),
-        ),
     ];
     if let Some(model_str) = agent_entry.meta.model_name.as_deref() {
-        // Insert model name after agent_type (index 8, before the time sep)
-        let insert_at = status_spans.len() - 3; // before sep+time+counts
-        status_spans.insert(
-            insert_at,
-            Span::styled(
-                format!("  {} {}", ICON_MODEL, model_str),
-                Style::default().fg(GRAY),
-            ),
-        );
+        status_spans.push(Span::styled(
+            format!(" {} {}", ICON_MODEL, model_str),
+            Style::default().fg(GRAY),
+        ));
     }
+    status_spans.push(sep.clone());
+    status_spans.push(Span::styled(
+        format!("{} {} running", ICON_RUN, running),
+        Style::default().fg(GREEN),
+    ));
+    status_spans.push(Span::styled(
+        format!(" {} {} waiting", ICON_WAIT, waiting),
+        Style::default().fg(YELLOW),
+    ));
     let status_line = Line::from(status_spans);
 
-    let nav = "  [Ctrl+g] Dashboard";
-    let brand = format!("  ♥ Stable v{}  ", env!("CARGO_PKG_VERSION"));
+    let nav = " [Ctrl+g] Dashboard";
+    let (brand, brand_width) = brand_line(false);
     let nav_width = nav.len() as u16;
-    let brand_width = brand.chars().count() as u16;
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -181,17 +166,14 @@ pub fn render_agent_view(
     f.render_widget(Paragraph::new(status_line), status_chunks[0]);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  [", Style::default().fg(BG2)),
+            Span::styled(" [", Style::default().fg(BG2)),
             Span::styled("Ctrl+g", Style::default().fg(ORANGE)),
             Span::styled("]", Style::default().fg(BG2)),
             Span::styled(" Dashboard", Style::default().fg(GRAY)),
         ])),
         status_chunks[1],
     );
-    f.render_widget(
-        Paragraph::new(brand).style(Style::default().fg(GRAY)),
-        status_chunks[2],
-    );
+    f.render_widget(Paragraph::new(brand), status_chunks[2]);
 
     // Stopped overlay
     if state.show_stopped_overlay {
