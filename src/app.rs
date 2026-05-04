@@ -2,11 +2,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::{interval, Duration};
 
-use crate::agent_discovery::DiscoveredAgents;
-use crate::agents::opencode::OpenCodeAdapter;
 use crate::agents::AgentAdapter;
-use crate::config::{AgentConfig, AgentKind, Config};
-use crate::models::{AgentEntry, AgentMeta, AgentStatus};
+use crate::config::Config;
+use crate::models::{AgentEntry, AgentMeta, AgentStatus, AgentType};
+use crate::runner::AgentRunner;
 use crate::tmux;
 use crate::ui::dashboard::grid_layout;
 
@@ -203,7 +202,7 @@ pub struct App {
     pub state: AppState,
     pub selected: usize,
     pub config: Config,
-    pub discovered: DiscoveredAgents,
+    pub runner: AgentRunner,
     pub agent_view_state: AgentViewState,
     pub create_state: CreateAgentState,
     pub tx: UnboundedSender<Event>,
@@ -223,7 +222,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, agents: Vec<AgentEntry>, adapters: Vec<Box<dyn AgentAdapter>>, discovered: DiscoveredAgents) -> Self {
+    pub fn new(config: Config, agents: Vec<AgentEntry>, adapters: Vec<Box<dyn AgentAdapter>>, runner: AgentRunner) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let card_count = agents.len();
         Self {
@@ -232,7 +231,7 @@ impl App {
             state: AppState::Dashboard,
             selected: 0,
             config,
-            discovered,
+            runner,
             agent_view_state: AgentViewState::default(),
             create_state: CreateAgentState::default(),
             tx,
@@ -242,6 +241,14 @@ impl App {
             card_response_heights: vec![0u16; card_count],
             card_response_widths: vec![0u16; card_count],
         }
+    }
+
+    pub fn is_claude_available(&self) -> bool {
+        self.runner.is_claude_available()
+    }
+
+    pub fn is_opencode_available(&self) -> bool {
+        self.runner.is_opencode_available()
     }
 
     /// Spawn background tasks (crossterm events, dashboard ticker, agent view ticker).
@@ -894,18 +901,8 @@ impl App {
                 if self.create_state.is_valid() {
                     let name = tmux::sanitize_name(&self.create_state.name.clone());
                     let dir = self.create_state.directory.clone();
-                    match OpenCodeAdapter::create(&dir, &name).await {
-                        Ok((adapter, window_index)) => {
-                            let pane = format!("{}:{}.0", tmux::session_name(), window_index);
-                            let config = AgentConfig {
-                                name: name.clone(),
-                                pane: pane.clone(),
-                                directory: dir,
-                                kind: AgentKind::Opencode {
-                                    port: adapter.port,
-                                    session_id: None,
-                                },
-                            };
+                    match self.runner.create(&name, &dir, AgentType::Opencode).await {
+                        Ok((config, adapter)) => {
                             self.config.agents.push(config.clone());
                             let _ = self.config.save();
                             let entry = AgentEntry {
@@ -913,7 +910,7 @@ impl App {
                                 meta: AgentMeta::default(),
                             };
                             self.agents.push(entry);
-                            self.adapters.push(Box::new(adapter));
+                            self.adapters.push(adapter);
                             let new_idx = self.agents.len() - 1;
                             self.selected = new_idx;
                             self.agent_view_state = AgentViewState::default();
@@ -1001,40 +998,31 @@ impl App {
         }
     }
 
-    /// Restart a stopped agent: scan for a free port, open a new tmux window,
-    /// launch opencode with `--session <id>` to resume the existing session,
-    /// then update the in-memory state and persist the config.
+    /// Restart a stopped agent via AgentRunner, then update in-memory state
+    /// and persist the config.
     pub async fn restart_agent(&mut self, idx: usize) {
-        let (dir, name, session_id) = match self.config.agents.get(idx) {
-            Some(c) => (c.directory.clone(), c.name.clone(), c.session_id().map(str::to_owned)),
+        let config = match self.config.agents.get(idx) {
+            Some(c) => c.clone(),
             None => return,
         };
 
-        match OpenCodeAdapter::restart(&dir, &name, session_id.as_deref()).await {
-            Ok((new_adapter, window_index, new_port)) => {
-                let new_pane = format!("{}:{}.0", tmux::session_name(), window_index);
-
+        match self.runner.restart(&config).await {
+            Ok((new_config, new_adapter)) => {
                 // Update persisted config.
                 if let Some(c) = self.config.agents.get_mut(idx) {
-                    c.pane = new_pane.clone();
-                    if let AgentKind::Opencode { ref mut port, .. } = c.kind {
-                        *port = new_port;
-                    }
+                    *c = new_config.clone();
                 }
                 let _ = self.config.save();
 
                 // Update in-memory agent entry.
                 if let Some(entry) = self.agents.get_mut(idx) {
-                    entry.config.pane = new_pane;
-                    if let AgentKind::Opencode { ref mut port, .. } = entry.config.kind {
-                        *port = new_port;
-                    }
+                    entry.config = new_config;
                     entry.meta.status = AgentStatus::Unknown;
                 }
 
-                // Swap in the new adapter (drops + aborts the old SSE task).
+                // Swap in the new adapter.
                 if idx < self.adapters.len() {
-                    self.adapters[idx] = Box::new(new_adapter);
+                    self.adapters[idx] = new_adapter;
                 }
             }
             Err(_) => {

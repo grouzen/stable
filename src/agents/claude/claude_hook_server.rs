@@ -237,16 +237,20 @@ pub struct TranscriptInfo {
     /// Sum of all `TurnDuration` system-entry `durationMs` values — equivalent
     /// to OpenCode's `total_work_ms` (model generation time across the session).
     pub total_work_ms: u64,
+    /// Text of the first human prompt in the session (for cold-restart display).
+    pub first_prompt: Option<String>,
 }
 
 /// Parse `transcript_path` (JSONL) and return info from the last assistant entry.
 /// Returns `None` if the file cannot be opened or contains no assistant entries.
 pub fn parse_transcript(transcript_path: &str) -> Option<TranscriptInfo> {
-    use claude_code_transcripts::types::{AssistantContentBlock, Entry, SystemSubtype};
+    use claude_code_transcripts::types::{AssistantContentBlock, Entry, SystemSubtype,
+                                         UserContent, UserContentBlock, UserRole};
 
     let file = std::fs::File::open(transcript_path).ok()?;
     let reader = std::io::BufReader::new(file);
 
+    let mut first_prompt: Option<String> = None;
     let mut last_context_used: Option<u64> = None;
     let mut last_response_text: Option<String> = None;
     let mut last_model_name: Option<String> = None;
@@ -263,6 +267,29 @@ pub fn parse_transcript(transcript_path: &str) -> Option<TranscriptInfo> {
         };
 
         match entry {
+            Entry::User(u) => {
+                // Only capture genuine human prompts — skip tool results.
+                if first_prompt.is_none()
+                    && u.source_tool_use_id.is_none()
+                    && matches!(u.message.role, UserRole::User)
+                {
+                    let text = match &u.message.content {
+                        UserContent::Text(s) => Some(s.clone()),
+                        UserContent::Blocks(blocks) => blocks.iter().find_map(|b| {
+                            if let UserContentBlock::Text { text } = b {
+                                Some(text.clone())
+                            } else {
+                                None
+                            }
+                        }),
+                        UserContent::Other(_) => None,
+                    };
+                    if text.is_some() {
+                        first_prompt = text;
+                    }
+                }
+            }
+
             Entry::Assistant(a) => {
                 let usage = &a.message.usage;
                 let context_used = usage.input_tokens
@@ -297,5 +324,6 @@ pub fn parse_transcript(transcript_path: &str) -> Option<TranscriptInfo> {
         last_response_text,
         model_name: last_model_name,
         total_work_ms,
+        first_prompt,
     })
 }

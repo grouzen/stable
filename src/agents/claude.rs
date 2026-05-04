@@ -3,10 +3,12 @@ pub mod claude_hook_server;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::agents::AgentAdapter;
 use crate::models::{AgentStatus, ContextInfo};
-use claude_hook_server::HookStateMap;
+use claude_hook_server::{ClaudeHookState, HookStateMap};
 
 // ---------------------------------------------------------------------------
 // ClaudeAdapter
@@ -64,6 +66,107 @@ impl AgentAdapter for ClaudeAdapter {
     fn get_cached_session_id(&self) -> Option<String> {
         let map = self.hook_state.lock().unwrap();
         map.get(&self.stable_agent_id)?.session_id.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ClaudeRuntime — owns the HookStateMap and hook server lifecycle
+// ---------------------------------------------------------------------------
+
+pub(crate) struct ClaudeRuntime {
+    hook_state: HookStateMap,
+}
+
+impl ClaudeRuntime {
+    /// Spawn the hook server and a background persist task, return a runtime
+    /// handle.  `session_name` is used by the persist task to find the correct
+    /// config file when patching session_id / transcript_path.
+    pub(crate) fn start(port: u16, session_name: String) -> Self {
+        let hook_state: HookStateMap = Arc::new(Mutex::new(HashMap::new()));
+        let (persist_tx, mut persist_rx) =
+            tokio::sync::mpsc::unbounded_channel::<claude_hook_server::HookPersistEvent>();
+
+        claude_hook_server::spawn_hook_server(hook_state.clone(), persist_tx, port);
+
+        // Background task: receive persist events and patch the session config file.
+        tokio::spawn(async move {
+            while let Some(event) = persist_rx.recv().await {
+                if let Ok(mut config) = crate::config::Config::load(&session_name) {
+                    for agent in config.agents.iter_mut() {
+                        if let crate::config::AgentKind::Claude {
+                            stable_agent_id,
+                            session_id,
+                            transcript_path,
+                        } = &mut agent.kind
+                        {
+                            if *stable_agent_id == event.stable_agent_id {
+                                *session_id = Some(event.session_id.clone());
+                                if event.transcript_path.is_some() {
+                                    *transcript_path = event.transcript_path.clone();
+                                }
+                            }
+                        }
+                    }
+                    let _ = config.save();
+                }
+            }
+        });
+
+        Self { hook_state }
+    }
+
+    /// Create a `ClaudeAdapter` for a given `stable_agent_id`, pre-inserting
+    /// a default entry in the shared map if one doesn't already exist.
+    pub(crate) fn make_adapter(&self, stable_agent_id: String) -> ClaudeAdapter {
+        {
+            let mut map = self.hook_state.lock().unwrap();
+            map.entry(stable_agent_id.clone())
+                .or_insert_with(ClaudeHookState::default);
+        }
+        ClaudeAdapter::new(stable_agent_id, self.hook_state.clone())
+    }
+
+    /// Pre-populate the hook state from persisted config so that the dashboard
+    /// shows meaningful data immediately on startup (before the first hook fires).
+    pub(crate) fn restore(
+        &self,
+        id: &str,
+        session_id: Option<String>,
+        transcript_path: Option<String>,
+    ) {
+        let mut map = self.hook_state.lock().unwrap();
+        let entry = map
+            .entry(id.to_owned())
+            .or_insert_with(ClaudeHookState::default);
+
+        if session_id.is_some() {
+            entry.session_id = session_id;
+        }
+        if let Some(ref path) = transcript_path {
+            entry.transcript_path = Some(path.clone());
+            if let Some(info) = claude_hook_server::parse_transcript(path) {
+                entry.context_used = Some(info.context_used);
+                entry.last_model_response = info.last_response_text;
+                if info.model_name.is_some() {
+                    entry.model_name = info.model_name;
+                }
+                entry.total_work_ms = info.total_work_ms;
+                if info.first_prompt.is_some() {
+                    entry.first_prompt = info.first_prompt;
+                }
+            }
+            entry.status = AgentStatus::WaitingForInput;
+        }
+    }
+
+    /// Reset the status of an existing agent entry to `Unknown` so the UI
+    /// reflects "restarting" rather than "stopped" while the new process boots.
+    /// If no entry exists for `id` this is a no-op.
+    pub(crate) fn reset_status(&self, id: &str) {
+        let mut map = self.hook_state.lock().unwrap();
+        if let Some(entry) = map.get_mut(id) {
+            entry.status = AgentStatus::Unknown;
+        }
     }
 }
 

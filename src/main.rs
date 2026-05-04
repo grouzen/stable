@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod global_config;
 mod models;
+mod runner;
 mod tmux;
 mod tui;
 mod ui;
@@ -12,12 +13,11 @@ use anyhow::Result;
 use clap::Parser;
 
 use agent_discovery::DiscoveredAgents;
-use agents::opencode::OpenCodeAdapter;
-use agents::AgentAdapter;
 use app::App;
-use config::{AgentKind, Config};
+use config::Config;
 use global_config::GlobalConfig;
 use models::{AgentEntry, AgentMeta, AgentStatus};
+use runner::AgentRunner;
 
 /// stable — multi-agent TUI dashboard
 #[derive(Parser, Debug)]
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     let discovered = DiscoveredAgents::probe();
 
     // Load global (cross-session) config
-    let _global_config = GlobalConfig::load()?;
+    let global_config = GlobalConfig::load()?;
 
     // Initialise the tmux session name before any tmux operations.
     tmux::init(&cli.tmux_session);
@@ -48,68 +48,48 @@ async fn main() -> Result<()> {
     // Load persisted config for this session
     let mut config = Config::load(&cli.tmux_session)?;
 
+    // Build the AgentRunner which owns all agent lifecycle logic.
+    let mut runner = AgentRunner::new(discovered, global_config, cli.tmux_session.clone());
+
     // Auto-resume any agents whose tmux pane died (e.g. after a tmux server
-    // restart).  For each dead pane we open a new tmux window and relaunch
-    // opencode with `--session <id>` so the existing session is preserved.
-    // Only applies to Opencode agents — Claude agents manage their own process.
+    // restart).  Uses AgentRunner::restart so Claude agents are skipped
+    // gracefully (restart returns Err for Claude).
     let mut config_dirty = false;
     for agent_config in config.agents.iter_mut() {
-        if let AgentKind::Opencode { ref mut port, ref session_id } = agent_config.kind {
-            if !tmux::is_alive(&agent_config.pane) {
-                match OpenCodeAdapter::restart(
-                    &agent_config.directory,
-                    &agent_config.name,
-                    session_id.as_deref(),
-                )
-                .await
-                {
-                    Ok((_adapter, window_index, new_port)) => {
-                        agent_config.pane = format!("{}:{}.0", tmux::session_name(), window_index);
-                        *port = new_port;
-                        config_dirty = true;
-                    }
-                    Err(_) => {
-                        // Could not restart this agent — leave config unchanged so
-                        // the user can manually restart or remove it from the UI.
-                    }
-                }
+        if !tmux::is_alive(&agent_config.pane) {
+            if let Ok((updated_config, _adapter)) = runner.restart(agent_config).await {
+                *agent_config = updated_config;
+                config_dirty = true;
             }
+            // On failure (including Claude agents) the config is left unchanged.
         }
     }
     if config_dirty {
         let _ = config.save();
     }
 
-    // Reconstruct agents and adapters from stored config
+    // Reconstruct agents and adapters from stored config.
     let mut agents: Vec<AgentEntry> = Vec::new();
-    let mut adapters: Vec<Box<dyn AgentAdapter>> = Vec::new();
+    let mut agent_adapters: Vec<Box<dyn agents::AgentAdapter>> = Vec::new();
 
     for agent_config in &config.agents {
-        match &agent_config.kind {
-            AgentKind::Opencode { port, session_id } => {
-                let adapter = OpenCodeAdapter::new(*port, session_id.clone());
-                agents.push(AgentEntry {
-                    config: agent_config.clone(),
-                    meta: AgentMeta {
-                        status: AgentStatus::Unknown,
-                        context: None,
-                        first_prompt: None,
-                        last_model_response: None,
-                        model_name: None,
-                        total_work_ms: 0,
-                    },
-                });
-                adapters.push(Box::new(adapter));
-            }
-            AgentKind::Claude { .. } => {
-                // ClaudeAdapter will be wired in Phase 7.
-                // For now, skip Claude agents on startup to avoid compile errors.
-            }
-        }
+        let adapter = runner.restore(agent_config);
+        agents.push(AgentEntry {
+            config: agent_config.clone(),
+            meta: AgentMeta {
+                status: AgentStatus::Unknown,
+                context: None,
+                first_prompt: None,
+                last_model_response: None,
+                model_name: None,
+                total_work_ms: 0,
+            },
+        });
+        agent_adapters.push(adapter);
     }
 
     // Build App and spawn background tasks
-    let mut app = App::new(config, agents, adapters, discovered);
+    let mut app = App::new(config, agents, agent_adapters, runner);
     app.spawn_tasks();
 
     tui::run(|mut terminal| async move {
