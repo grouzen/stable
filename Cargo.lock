@@ -2459,6 +2459,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "chrono",
  "clap",
  "claude-code-transcripts",
  "crossterm",

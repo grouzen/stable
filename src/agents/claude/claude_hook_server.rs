@@ -256,8 +256,8 @@ pub struct TranscriptInfo {
 /// Parse `transcript_path` (JSONL) and return info from the last assistant entry.
 /// Returns `None` if the file cannot be opened or contains no assistant entries.
 pub fn parse_transcript(transcript_path: &str) -> Option<TranscriptInfo> {
-    use claude_code_transcripts::types::{AssistantContentBlock, Entry, SystemSubtype,
-                                         UserContent, UserContentBlock, UserRole};
+    use claude_code_transcripts::types::{AssistantContentBlock, Entry, UserContent,
+                                         UserContentBlock, UserRole};
 
     let file = std::fs::File::open(transcript_path).ok()?;
     let reader = std::io::BufReader::new(file);
@@ -267,6 +267,10 @@ pub fn parse_transcript(transcript_path: &str) -> Option<TranscriptInfo> {
     let mut last_response_text: Option<String> = None;
     let mut last_model_name: Option<String> = None;
     let mut total_work_ms: u64 = 0;
+
+    // For computing per-turn work time from timestamps.
+    let mut current_turn_user_ts: Option<i64> = None;
+    let mut current_turn_last_assistant_ts: Option<i64> = None;
 
     for line in reader.lines().map_while(Result::ok) {
         let line = line.trim().to_owned();
@@ -280,23 +284,49 @@ pub fn parse_transcript(transcript_path: &str) -> Option<TranscriptInfo> {
 
         match entry {
             Entry::User(u) => {
-                // Only capture genuine human prompts — skip tool results.
-                if first_prompt.is_none()
-                    && u.source_tool_use_id.is_none()
-                    && matches!(u.message.role, UserRole::User)
-                {
-                    let text = match &u.message.content {
-                        UserContent::Text(s) => Some(s.clone()),
-                        UserContent::Blocks(blocks) => blocks.iter().find_map(|b| {
-                            if let UserContentBlock::Text { text } = b {
-                                Some(text.clone())
-                            } else {
-                                None
-                            }
-                        }),
-                        UserContent::Other(_) => None,
-                    };
-                    if text.is_some() {
+                // Skip tool results, meta entries, and internal command messages.
+                if u.source_tool_use_id.is_some() {
+                    continue;
+                }
+                if u.envelope.is_meta == Some(true) {
+                    continue;
+                }
+                if !matches!(u.message.role, UserRole::User) {
+                    continue;
+                }
+
+                let text = match &u.message.content {
+                    UserContent::Text(s) => Some(s.clone()),
+                    UserContent::Blocks(blocks) => blocks.iter().find_map(|b| {
+                        if let UserContentBlock::Text { text } = b {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    UserContent::Other(_) => None,
+                };
+
+                // Skip internal command scaffolding (XML-tagged messages injected
+                // by Claude Code for slash-commands, stdout, etc.).
+                let text = match text {
+                    Some(t) if t.trim_start().starts_with('<') => None,
+                    other => other,
+                };
+
+                if text.is_some() {
+                    // A new real human turn begins — accumulate time for the
+                    // previous turn before resetting.
+                    if let (Some(u_ts), Some(a_ts)) =
+                        (current_turn_user_ts, current_turn_last_assistant_ts)
+                    {
+                        let delta = a_ts.saturating_sub(u_ts).max(0) as u64;
+                        total_work_ms += delta;
+                    }
+                    current_turn_user_ts = parse_ts_ms(&u.envelope.timestamp);
+                    current_turn_last_assistant_ts = None;
+
+                    if first_prompt.is_none() {
                         first_prompt = text;
                     }
                 }
@@ -319,16 +349,21 @@ pub fn parse_transcript(transcript_path: &str) -> Option<TranscriptInfo> {
                 last_context_used = Some(context_used);
                 last_response_text = response_text;
                 last_model_name = a.message.model.clone();
-            }
 
-            Entry::System(s) if matches!(s.subtype, SystemSubtype::TurnDuration) => {
-                if let Some(ms) = s.duration_ms {
-                    total_work_ms += ms as u64;
-                }
+                // Update the latest assistant timestamp for this turn.
+                current_turn_last_assistant_ts = parse_ts_ms(&a.envelope.timestamp);
             }
 
             _ => {}
         }
+    }
+
+    // Accumulate time for the last (most recent) turn.
+    if let (Some(u_ts), Some(a_ts)) =
+        (current_turn_user_ts, current_turn_last_assistant_ts)
+    {
+        let delta = a_ts.saturating_sub(u_ts).max(0) as u64;
+        total_work_ms += delta;
     }
 
     last_context_used.map(|context_used| TranscriptInfo {
@@ -338,4 +373,13 @@ pub fn parse_transcript(transcript_path: &str) -> Option<TranscriptInfo> {
         total_work_ms,
         first_prompt,
     })
+}
+
+/// Parse an ISO 8601 timestamp string (e.g. `"2026-05-08T05:27:28.047Z"`) into
+/// milliseconds since the Unix epoch.  Returns `None` on parse failure.
+fn parse_ts_ms(ts: &str) -> Option<i64> {
+    use chrono::DateTime;
+    DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
