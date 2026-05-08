@@ -261,34 +261,6 @@ fn has_stable_hooks(hooks_root: &Value) -> bool {
     false
 }
 
-/// Remove all stable-managed hook entries from `hooks_root` (in-place).
-/// An entry is identified by a URL pointing to `127.0.0.1` and ending with
-/// `/hook`.  Empty event arrays are removed entirely.
-fn remove_stable_hooks(hooks_root: &mut Value) {
-    let Some(obj) = hooks_root.as_object_mut() else { return };
-    for event_val in obj.values_mut() {
-        let Some(arr) = event_val.as_array_mut() else { continue };
-        for hook_group in arr.iter_mut() {
-            let Some(inner) = hook_group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                continue;
-            };
-            inner.retain(|h| {
-                let url = h.get("url").and_then(Value::as_str).unwrap_or("");
-                !(url.contains("127.0.0.1") && url.ends_with(HOOK_URL_PATH))
-            });
-        }
-        // Remove hook groups that are now empty.
-        arr.retain(|g| {
-            g.get("hooks")
-                .and_then(Value::as_array)
-                .map(|a| !a.is_empty())
-                .unwrap_or(true)
-        });
-    }
-    // Remove event keys that have no remaining hook groups.
-    obj.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(true));
-}
-
 fn settings_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
 }
@@ -335,27 +307,6 @@ pub fn install_hooks(port: u16) -> Result<()> {
         if let Some(entries) = new_entries.as_array() {
             arr.extend(entries.iter().cloned());
         }
-    }
-
-    write_settings(&path, &root)
-}
-
-/// Remove stable's HTTP hooks from `~/.claude/settings.json`.
-///
-/// Safe to call even if hooks are not installed (no-op in that case).
-pub fn uninstall_hooks() -> Result<()> {
-    let path = settings_path().context("cannot determine home directory")?;
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {:?}", path))?;
-    let mut root: Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parse {:?}", path))?;
-
-    if let Some(hooks) = root.get_mut("hooks") {
-        remove_stable_hooks(hooks);
     }
 
     write_settings(&path, &root)

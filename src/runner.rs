@@ -40,17 +40,6 @@ impl AgentRunner {
     }
 
     // -----------------------------------------------------------------------
-    // Availability checks (App delegates to these instead of reading fields)
-    // -----------------------------------------------------------------------
-
-    pub fn is_claude_available(&self) -> bool {
-        self.discovered.claude.is_some()
-    }
-
-    pub fn is_opencode_available(&self) -> bool {
-        self.discovered.opencode.is_some()
-    }
-
     /// Returns all agent types whose binaries were found on `$PATH`.
     /// The order is stable: Opencode first, Claude second.  Future agent types
     /// should be appended here; callers must not hardcode the list.

@@ -42,17 +42,4 @@ impl GlobalConfig {
         let config: GlobalConfig = toml::from_str(&contents)?;
         Ok(config)
     }
-
-    /// Atomically write the config to disk (write to `.tmp`, then rename).
-    pub fn save(&self) -> Result<()> {
-        let path = config_path().ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("toml.tmp");
-        let contents = toml::to_string_pretty(self)?;
-        std::fs::write(&tmp, contents)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    }
 }

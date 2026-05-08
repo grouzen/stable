@@ -257,14 +257,6 @@ impl App {
         }
     }
 
-    pub fn is_claude_available(&self) -> bool {
-        self.runner.is_claude_available()
-    }
-
-    pub fn is_opencode_available(&self) -> bool {
-        self.runner.is_opencode_available()
-    }
-
     /// Spawn background tasks (crossterm events, dashboard ticker, agent view ticker).
     pub fn spawn_tasks(&self) {
         // Crossterm event reader
