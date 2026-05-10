@@ -192,6 +192,10 @@ impl ClaudeRuntime {
                 }
             }
             entry.status = AgentStatus::WaitingForInput;
+        } else if entry.session_id.is_some() {
+            // If we have a session_id but no transcript_path yet (e.g., stable restarted
+            // before the first Stop hook), assume the agent is waiting for input.
+            entry.status = AgentStatus::WaitingForInput;
         }
     }
 
