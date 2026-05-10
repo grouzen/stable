@@ -6,13 +6,19 @@ Install Stable to keep your trusty steed's harness under the solid roof!
 
 # Behold
 
-Dashboard view
+## Dashboard view
 
 ![](/docs/demo/dashboard-view.png)
 
-Agent view (OpenCode)
+## Agent view
+
+OpenCode
 
 ![](/docs/demo/agent-view-opencode.png)
+
+Claude Code
+
+![](/docs/demo/agent-view-claude-code.png)
 
 # Tech considerations
 
